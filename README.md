@@ -10,6 +10,8 @@ The core package defines the contracts used by its first-class stack:
 
 The supported production shape is SQLite for the local cache, Redis for route events, and PostgreSQL for the route source of truth. The in-memory adapters remain useful for tests and single-process development.
 
+See [the database schema reference](docs/database.md) for every persisted SQLite cache field and ready-to-run inspection queries.
+
 ## Architecture
 
 ```mermaid
