@@ -1,4 +1,7 @@
 import assert from "assert";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 import {
   TenantRouteNotFoundError,
@@ -9,6 +12,7 @@ import {
   createTenantRouter,
   matchTenant
 } from "../src/index.ts";
+import { createSqliteRouteCache } from "../src/node.ts";
 
 const tests = [];
 
@@ -257,6 +261,49 @@ test("throws a specific error when a tenant route does not exist", async () => {
       error instanceof TenantRouteNotFoundError &&
       error.tenantId === "missing"
   );
+});
+
+test("uses the SQLite route cache through the router", async () => {
+  const routeStore = createMemoryRouteStore({
+    routes: [{ tenantId: "sqlite", shardId: "shard-a", routeVersion: 1 }]
+  });
+  const cache = createSqliteRouteCache({ path: ":memory:" });
+  const router = createTenantRouter({ routeStore, cache });
+
+  assert.equal((await router.explain("sqlite")).source, "store");
+  routeStore.setTenantRoute({
+    tenantId: "sqlite",
+    shardId: "shard-b",
+    routeVersion: 2
+  });
+  assert.equal((await router.explain("sqlite")).route.shardId, "shard-a");
+
+  await router.invalidate("sqlite");
+  assert.equal((await router.resolve("sqlite")).shardId, "shard-b");
+
+  await router.close();
+  cache.close();
+});
+
+test("retains SQLite route cache entries after reopening the database", () => {
+  const directory = mkdtempSync(join(tmpdir(), "tenant-router-"));
+  const path = join(directory, "routes.db");
+
+  try {
+    const firstCache = createSqliteRouteCache({ path });
+    firstCache.set({
+      tenantId: "persistent",
+      shardId: "shard-a",
+      routeVersion: 1
+    });
+    firstCache.close();
+
+    const reopenedCache = createSqliteRouteCache({ path });
+    assert.equal(reopenedCache.get("persistent").shardId, "shard-a");
+    reopenedCache.close();
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 let failed = 0;

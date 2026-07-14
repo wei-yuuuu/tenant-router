@@ -2,11 +2,13 @@
 
 Framework-neutral core API for resolving `tenantId -> shardId` routes.
 
-The core package does not require Redis or Postgres. Instead, it defines the contracts they should implement:
+The core package defines the contracts used by its first-class stack:
 
 - `RouteStore`: source of truth for tenant routes
 - `RouteEventBus`: route-change events and cache invalidation
 - `RouteCache`: local low-latency route cache
+
+The supported production shape is SQLite for the local cache, Redis for route events, and PostgreSQL for the route source of truth. The in-memory adapters remain useful for tests and single-process development.
 
 ## Architecture
 
@@ -19,15 +21,16 @@ flowchart LR
   Router -->|"TenantRoute shardId + version"| Service
 
   Operator["Operator / command API"] -->|"move tenant / assign shard"| Store
-  Operator -->|"publish RouteEvent"| Events["RouteEventBus"]
+  Operator -->|"publish RouteEvent"| Events["RouteEventBus (broker)"]
   Events -->|"invalidate or refresh"| Router
   Router -->|"delete or set route"| Cache
 
   Postgres["Future postgresRouteStore"] -. implements .-> Store
   Redis["Future redisRouteEvents"] -. implements .-> Events
+  Sqlite["sqliteRouteCache"] -. implements .-> Cache
 ```
 
-This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts official Redis/Postgres adapters will implement later.
+This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts for its SQLite, Redis, and PostgreSQL adapters.
 
 ## Core Usage
 
@@ -94,8 +97,24 @@ await events.publish({
 
 Official adapters should implement the core interfaces:
 
-- `postgresRouteStore(...)` should implement `RouteStore`.
-- `redisRouteEvents(...)` should implement `RouteEventBus`.
+- `sqliteRouteCache(...)` implements `RouteCache` and is available from `tenant-router/node`.
+- `postgresRouteStore(...)` will implement `RouteStore`.
+- `redisRouteEvents(...)` will implement `RouteEventBus`.
+
+## SQLite Cache
+
+Use the Node-only SQLite adapter when a process should retain its local cache across restarts. It remains a cache: PostgreSQL will remain the authoritative `RouteStore`.
+
+```ts
+import { createSqliteRouteCache } from "tenant-router/node";
+
+const cache = createSqliteRouteCache({
+  path: "./tenant-routes.db",
+  ttlMs: 30_000
+});
+
+const router = createTenantRouter({ routeStore, events, cache });
+```
 
 ## Tenant Request Matching
 
