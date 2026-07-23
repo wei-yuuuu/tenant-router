@@ -15,6 +15,7 @@ import {
 } from "../src/index.ts";
 import { createSqliteRouteCache } from "../src/node.ts";
 import { createPostgresRouteStore } from "../src/postgres.ts";
+import { createRedisRouteEvents } from "../src/redis.ts";
 
 const tests = [];
 
@@ -416,6 +417,58 @@ test("maps PostgreSQL route rows and uses monotonic route upserts", async () => 
     routeVersion: 8
   });
   assert.ok(queries[1].text.includes("route_version < EXCLUDED.route_version"));
+});
+
+test("publishes and consumes route events through a Redis stream", async () => {
+  const messages = [];
+  let nextMessageId = 1;
+  const client = {
+    isOpen: true,
+    async connect() {},
+    duplicate() {
+      return this;
+    },
+    async xAdd(streamKey, id, fields) {
+      messages.push({
+        id: `${nextMessageId++}-0`,
+        message: fields,
+        streamKey,
+        requestedId: id
+      });
+      return messages.at(-1).id;
+    },
+    async xRead() {
+      if (messages.length > 0) {
+        const message = messages.shift();
+        return [{ name: message.streamKey, messages: [message] }];
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return null;
+    },
+    async quit() {}
+  };
+  const events = createRedisRouteEvents({ client, blockMs: 10 });
+  const received = new Promise((resolve) => {
+    events.subscribe(resolve);
+  });
+
+  await events.publish({
+    type: "tenant.created",
+    tenantId: "acme",
+    shardId: "shard-a",
+    routeVersion: 1
+  });
+
+  const event = await Promise.race([
+    received,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Redis event was not received.")), 500)
+    )
+  ]);
+  assert.equal(event.type, "tenant.created");
+  assert.equal(event.tenantId, "acme");
+  await events.close();
 });
 
 let failed = 0;

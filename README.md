@@ -147,7 +147,7 @@ Official adapters should implement the core interfaces:
 
 - `sqliteRouteCache(...)` implements `RouteCache` and is available from `tenant-router/node`.
 - `postgresRouteStore(...)` implements `RouteStore`, `TenantRouteRegistry`, and `ShardRegistry`, and is available from `tenant-router/postgres`.
-- `redisRouteEvents(...)` will implement `RouteEventBus`.
+- `redisRouteEvents(...)` implements `RouteEventBus` through Redis Streams and is available from `tenant-router/redis`.
 
 ```ts
 import { createPostgresRouteStore } from "tenant-router/postgres";
@@ -164,6 +164,17 @@ const commands = createTenantRouteCommands({
 ```
 
 Apply [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) before using the PostgreSQL adapter.
+
+The Redis adapter writes each event to a stream and gives every API process its own cursor, so every router receives every route change.
+
+```ts
+import { createRedisRouteEvents } from "tenant-router/redis";
+
+const events = createRedisRouteEvents({
+  url: process.env.REDIS_URL,
+  streamKey: "tenant-router:route-events"
+});
+```
 
 ## SQLite Cache
 

@@ -17,11 +17,15 @@
     "./postgres": {
       "types": "./src/postgres.ts",
       "default": "./src/postgres.ts"
+    },
+    "./redis": {
+      "types": "./src/redis.ts",
+      "default": "./src/redis.ts"
     }
   },
   "scripts": {
     "test": "node test/tenant-router.test.js",
-    "check": "node --check src/index.ts && node --check src/node.ts && node --check src/postgres.ts",
+    "check": "node --check src/index.ts && node --check src/node.ts && node --check src/postgres.ts && node --check src/redis.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
@@ -39,6 +43,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "redis": "^6.1.0"
   }
 }
