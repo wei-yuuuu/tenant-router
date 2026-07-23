@@ -55,4 +55,65 @@ sqlite3 -header -column data/tenant-routes.sqlite "
 
 ## PostgreSQL Route Store
 
-`postgresRouteStore` is not implemented yet, so its physical tables and columns are intentionally not defined here. When it is added, its migration and complete field reference will be documented in this file before the adapter is released.
+The PostgreSQL schema is defined in [`migrations/001_tenant_router.sql`](../migrations/001_tenant_router.sql). PostgreSQL is the route source of truth; SQLite remains a local API cache.
+
+### `tenant_router_shards`
+
+| Column | PostgreSQL type | Nullable | Description |
+| --- | --- | --- | --- |
+| `shard_id` | `TEXT` | No | Primary key used by tenant routes and application shard pools. |
+| `name` | `TEXT` | Yes | Human-readable shard name. |
+| `status` | `TEXT` | No | Shard lifecycle status, such as `active`, `draining`, or `disabled`. |
+| `region` | `TEXT` | Yes | Deployment region or placement label. |
+| `capacity` | `INTEGER` | Yes | Optional shard capacity limit. |
+| `load_score` | `DOUBLE PRECISION` | Yes | Optional current load score used by operator tooling. |
+| `metadata` | `JSONB` | No | Adapter-specific shard metadata. |
+| `created_at` | `TIMESTAMPTZ` | No | Shard record creation time. |
+| `updated_at` | `TIMESTAMPTZ` | No | Last shard record update time. |
+
+### `tenant_router_routes`
+
+| Column | PostgreSQL type | Nullable | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | `TEXT` | No | Primary key and normalized tenant identifier. |
+| `shard_id` | `TEXT` | No | Foreign key to `tenant_router_shards.shard_id`. |
+| `route_version` | `BIGINT` | No | Monotonically increasing route version used to reject stale writes. |
+| `tier` | `TEXT` | Yes | Tenant tier, such as `free`, `pro`, or `enterprise`. |
+| `status` | `TEXT` | No | Tenant route status, such as `active`, `moving`, or `disabled`. |
+| `reason` | `TEXT` | Yes | Operator or command reason for the latest route change. |
+| `updated_at` | `TIMESTAMPTZ` | No | Last route update time. |
+| `metadata` | `JSONB` | No | Adapter-specific tenant route metadata. |
+
+### Inspect Routes
+
+```sh
+psql "$ROUTING_DATABASE_URL" -c "
+  SELECT
+    tenant_id,
+    shard_id,
+    route_version,
+    tier,
+    status,
+    reason,
+    updated_at
+  FROM tenant_router_routes
+  ORDER BY updated_at DESC;
+"
+```
+
+### Inspect Shards
+
+```sh
+psql "$ROUTING_DATABASE_URL" -c "
+  SELECT
+    shard_id,
+    name,
+    status,
+    region,
+    capacity,
+    load_score,
+    updated_at
+  FROM tenant_router_shards
+  ORDER BY shard_id;
+"
+```

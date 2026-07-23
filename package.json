@@ -13,11 +13,15 @@
     "./node": {
       "types": "./src/node.ts",
       "default": "./src/node.ts"
+    },
+    "./postgres": {
+      "types": "./src/postgres.ts",
+      "default": "./src/postgres.ts"
     }
   },
   "scripts": {
     "test": "node test/tenant-router.test.js",
-    "check": "node --check src/index.ts && node --check src/node.ts",
+    "check": "node --check src/index.ts && node --check src/node.ts && node --check src/postgres.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
@@ -31,6 +35,10 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "@types/pg": "^8.20.0",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "pg": "^8.22.0"
   }
 }

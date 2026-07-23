@@ -14,6 +14,7 @@ import {
   matchTenant
 } from "../src/index.ts";
 import { createSqliteRouteCache } from "../src/node.ts";
+import { createPostgresRouteStore } from "../src/postgres.ts";
 
 const tests = [];
 
@@ -375,6 +376,46 @@ test("commands reject duplicate tenant creation and unknown tenant moves", async
     (error) =>
       error instanceof TenantRouterError && error.code === "INVALID_SHARD_ID"
   );
+});
+
+test("maps PostgreSQL route rows and uses monotonic route upserts", async () => {
+  const queries = [];
+  const pool = {
+    async query(text, values) {
+      queries.push({ text, values });
+      if (text.includes("FROM tenant_router_routes")) {
+        return {
+          rows: [
+            {
+              tenant_id: "acme",
+              shard_id: "shard-a",
+              route_version: "7",
+              tier: "pro",
+              status: "active",
+              reason: "initial assignment",
+              updated_at: new Date("2026-07-23T00:00:00.000Z"),
+              metadata: { source: "operator" }
+            }
+          ]
+        };
+      }
+      return { rows: [] };
+    },
+    async end() {}
+  };
+  const store = createPostgresRouteStore({ pool });
+
+  const route = await store.getTenantRoute(" acme ");
+  assert.equal(route.routeVersion, 7);
+  assert.equal(route.shardId, "shard-a");
+  assert.deepEqual(route.metadata, { source: "operator" });
+
+  await store.setTenantRoute({
+    tenantId: "acme",
+    shardId: "shard-b",
+    routeVersion: 8
+  });
+  assert.ok(queries[1].text.includes("route_version < EXCLUDED.route_version"));
 });
 
 let failed = 0;

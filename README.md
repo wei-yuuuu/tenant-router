@@ -146,8 +146,24 @@ Commands also provide `assignTenantToShard`, `changeTenantTier`, and `disableTen
 Official adapters should implement the core interfaces:
 
 - `sqliteRouteCache(...)` implements `RouteCache` and is available from `tenant-router/node`.
-- `postgresRouteStore(...)` will implement `RouteStore`.
+- `postgresRouteStore(...)` implements `RouteStore`, `TenantRouteRegistry`, and `ShardRegistry`, and is available from `tenant-router/postgres`.
 - `redisRouteEvents(...)` will implement `RouteEventBus`.
+
+```ts
+import { createPostgresRouteStore } from "tenant-router/postgres";
+
+const routeStore = createPostgresRouteStore({
+  connectionString: process.env.ROUTING_DATABASE_URL
+});
+
+const commands = createTenantRouteCommands({
+  routeRegistry: routeStore,
+  shardRegistry: routeStore,
+  events
+});
+```
+
+Apply [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) before using the PostgreSQL adapter.
 
 ## SQLite Cache
 
