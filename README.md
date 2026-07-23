@@ -15,21 +15,24 @@ See [the database schema reference](docs/database.md) for every persisted SQLite
 ## Architecture
 
 ```mermaid
-flowchart LR
-  Service["Application service"] -->|"resolve(tenantId)"| Router["TenantShardRouter"]
-  Router -->|"cache get/set"| Cache["RouteCache"]
-  Router -->|"cache miss"| Store["RouteStore"]
-  Store -->|"TenantRoute"| Router
-  Router -->|"TenantRoute shardId + version"| Service
+flowchart TB
+  subgraph ControlPlane["Control plane"]
+    direction RL
+    Operator["Operator / TenantRouteCommands"] -->|"write route or provision shard"| Store["PostgreSQL RouteStore"]
+    Operator -->|"publish RouteEvent"| Redis["Redis route events"]
+    Redis -->|"consume event"| Broker["RouteEventBus broker"]
+  end
 
-  Operator["TenantRouteCommands"] -->|"move tenant / assign shard"| Store
-  Operator -->|"publish RouteEvent"| Events["RouteEventBus (broker)"]
-  Events -->|"invalidate or refresh"| Router
-  Router -->|"delete or set route"| Cache
+  subgraph DataPlane["API process"]
+    direction LR
+    Client["Client"] --> API["Application service"]
+    API -->|"resolve(tenantId)"| Router["TenantShardRouter"]
+    Router -->|"cache get/set"| Cache["SQLite RouteCache"]
+    Router -->|"cache miss"| Store
+    Router -->|"shardId"| Shards["PostgreSQL shards"]
+  end
 
-  Postgres["Future postgresRouteStore"] -. implements .-> Store
-  Redis["Future redisRouteEvents"] -. implements .-> Events
-  Sqlite["sqliteRouteCache"] -. implements .-> Cache
+  Broker -->|"invalidate or refresh"| Router
 ```
 
 This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts for its SQLite, Redis, and PostgreSQL adapters.
