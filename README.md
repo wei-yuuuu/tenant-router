@@ -18,9 +18,9 @@ See [the database schema reference](docs/database.md) for every persisted SQLite
 flowchart TB
   subgraph ControlPlane["Control plane"]
     direction RL
-    Operator["Operator / TenantRouteCommands"] -->|"write route or provision shard"| Store["PostgreSQL RouteStore"]
+    Operator["TenantRouteCommands (operator)"] -->|"write route or provision shard"| Store["PostgreSQL RouteStore"]
     Operator -->|"publish RouteEvent"| Redis["Redis route events"]
-    Redis -->|"consume event"| Broker["RouteEventBus broker"]
+    Redis -->|"consume event"| Broker["RouteEventBus (broker)"]
   end
 
   subgraph DataPlane["API process"]
