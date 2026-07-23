@@ -26,13 +26,26 @@ flowchart TB
   subgraph DataPlane["API process"]
     direction LR
     Client["Client"] --> API["Application service"]
-    API -->|"resolve(tenantId)"| Router["TenantShardRouter"]
+    API -->|"resolve(tenantId) -> TenantRoute { shardId }"| Router["TenantShardRouter"]
     Router -->|"cache get/set"| Cache["SQLite RouteCache"]
     Router -->|"cache miss"| Store
-    Router -->|"shardId"| Shards["PostgreSQL shards"]
   end
 
   Broker -->|"invalidate or refresh"| Router
+
+  subgraph ShardFleet["PostgreSQL shard fleet"]
+    direction TB
+    Shard1["Shard 1"]
+    Shard2["Shard 2"]
+    Shard3["Shard 3"]
+    Shard4["Shard 4"]
+  end
+
+  Store -. "route and shard metadata" .-> Shard1
+  Store -. "route and shard metadata" .-> Shard2
+  Store -. "route and shard metadata" .-> Shard3
+  Store -. "route and shard metadata" .-> Shard4
+  API -->|"query selected shard (example)"| Shard2
 ```
 
 This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts for its SQLite, Redis, and PostgreSQL adapters.
