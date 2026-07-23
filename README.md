@@ -18,8 +18,8 @@ See [the database schema reference](docs/database.md) for every persisted SQLite
 flowchart TB
   subgraph ControlPlane["Control plane"]
     direction RL
-    Operator["TenantRouteCommands (operator)"] -->|"create tenant / move tenant / provision shard"| Store["PostgreSQL RouteStore"]
-    Operator -->|"publish RouteEvent"| Redis["Redis route events"]
+    Operator["TenantRouteCommands (operator)"] -->|"[1] create tenant / move tenant / provision shard"| Store["PostgreSQL RouteStore"]
+    Operator -->|"[2] publish RouteEvent"| Redis["Redis route events"]
     Redis -->|"consume event"| Broker["RouteEventBus (broker)"]
   end
 
