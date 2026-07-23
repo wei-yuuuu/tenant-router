@@ -18,7 +18,7 @@ See [the database schema reference](docs/database.md) for every persisted SQLite
 flowchart TB
   subgraph ControlPlane["Control plane"]
     direction RL
-    Operator["TenantRouteCommands (operator)"] -->|"write route or provision shard"| Store["PostgreSQL RouteStore"]
+    Operator["TenantRouteCommands (operator)"] -->|"create tenant / move tenant / provision shard"| Store["PostgreSQL RouteStore"]
     Operator -->|"publish RouteEvent"| Redis["Redis route events"]
     Redis -->|"consume event"| Broker["RouteEventBus (broker)"]
   end
@@ -27,11 +27,11 @@ flowchart TB
     direction LR
     Client["Client"] --> API["Application service"]
     API -->|"resolve(tenantId) -> TenantRoute { shardId }"| Router["TenantShardRouter"]
-    Router -->|"cache get/set"| Cache["SQLite RouteCache"]
+    Router -->|"cache get/set/invalidate"| Cache["SQLite RouteCache"]
     Router -->|"cache miss"| Store
   end
 
-  Broker -->|"invalidate or refresh"| Router
+  Broker -->|"RouteEvent"| Router
 
   subgraph ShardFleet["PostgreSQL shard fleet"]
     direction TB
@@ -46,6 +46,8 @@ flowchart TB
   Store -. "route and shard metadata" .-> Shard3
   Store -. "route and shard metadata" .-> Shard4
   API -->|"query selected shard (example)"| Shard2
+
+  Legend["Solid arrow: runtime data flow<br/>Dashed arrow: stored metadata relationship"]
 ```
 
 This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts for its SQLite, Redis, and PostgreSQL adapters.
