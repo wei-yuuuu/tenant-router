@@ -22,7 +22,7 @@ flowchart LR
   Store -->|"TenantRoute"| Router
   Router -->|"TenantRoute shardId + version"| Service
 
-  Operator["Operator / command API"] -->|"move tenant / assign shard"| Store
+  Operator["TenantRouteCommands"] -->|"move tenant / assign shard"| Store
   Operator -->|"publish RouteEvent"| Events["RouteEventBus (broker)"]
   Events -->|"invalidate or refresh"| Router
   Router -->|"delete or set route"| Cache
@@ -96,6 +96,34 @@ await events.publish({
 - `router.explain(tenantId)` reports whether the route came from cache or store.
 - `router.invalidate(tenantId)` manually clears one cached route.
 - `router.close()` unsubscribes from route events.
+
+## Route Commands
+
+`TenantRouteCommands` is the control-plane API. It writes a route first, then publishes an event that refreshes each subscribed router cache.
+
+```ts
+import { createTenantRouteCommands } from "tenant-router";
+
+const commands = createTenantRouteCommands({
+  routeRegistry,
+  shardRegistry,
+  events
+});
+
+await commands.provisionShard({ id: "shard-a", region: "ap-northeast-1" });
+await commands.createTenant({
+  tenantId: "acme",
+  shardId: "shard-a",
+  tier: "pro"
+});
+await commands.moveTenantToShard({
+  tenantId: "acme",
+  shardId: "shard-b",
+  reason: "rebalance"
+});
+```
+
+Commands also provide `assignTenantToShard`, `changeTenantTier`, and `disableTenant`. The PostgreSQL adapter will use a transaction/outbox so the route write and eventual Redis event publication remain recoverable.
 
 Official adapters should implement the core interfaces:
 

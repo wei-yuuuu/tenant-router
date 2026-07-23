@@ -6,6 +6,7 @@ import { join } from "path";
 import {
   TenantRouteNotFoundError,
   TenantRouterError,
+  createTenantRouteCommands,
   createMemoryRouteEvents,
   createMemoryRouteStore,
   createTenantMatcher,
@@ -304,6 +305,76 @@ test("retains SQLite route cache entries after reopening the database", () => {
   } finally {
     rmSync(directory, { force: true, recursive: true });
   }
+});
+
+test("commands persist routes and refresh subscribed routers", async () => {
+  const routeRegistry = createMemoryRouteStore();
+  const events = createMemoryRouteEvents();
+  const commands = createTenantRouteCommands({
+    routeRegistry,
+    shardRegistry: routeRegistry,
+    events,
+    now: () => new Date("2026-07-23T00:00:00.000Z")
+  });
+  const router = createTenantRouter({ routeStore: routeRegistry, events });
+
+  await commands.provisionShard({ id: "shard-a", region: "ap-northeast-1" });
+  const created = await commands.createTenant({
+    tenantId: "acme",
+    shardId: "shard-a",
+    tier: "pro"
+  });
+
+  assert.equal(created.routeVersion, 1);
+  assert.equal((await router.resolve("acme")).shardId, "shard-a");
+
+  await commands.moveTenantToShard({
+    tenantId: "acme",
+    shardId: "shard-b",
+    reason: "rebalance"
+  });
+
+  const route = await router.resolve("acme");
+  assert.equal(route.shardId, "shard-b");
+  assert.equal(route.routeVersion, 2);
+  assert.equal(route.reason, "rebalance");
+
+  await commands.changeTenantTier({ tenantId: "acme", tier: "enterprise" });
+  assert.equal((await router.resolve("acme")).tier, "enterprise");
+
+  await commands.disableTenant({ tenantId: "acme", reason: "account closed" });
+  const disabledRoute = await router.resolve("acme");
+  assert.equal(disabledRoute.status, "disabled");
+  assert.equal(disabledRoute.routeVersion, 4);
+
+  await router.close();
+});
+
+test("commands reject duplicate tenant creation and unknown tenant moves", async () => {
+  const routeRegistry = createMemoryRouteStore({
+    routes: [{ tenantId: "acme", shardId: "shard-a", routeVersion: 1 }]
+  });
+  const commands = createTenantRouteCommands({
+    routeRegistry,
+    shardRegistry: routeRegistry,
+    events: createMemoryRouteEvents()
+  });
+
+  await assert.rejects(
+    () => commands.createTenant({ tenantId: "acme", shardId: "shard-b" }),
+    (error) =>
+      error instanceof TenantRouterError &&
+      error.code === "TENANT_ROUTE_ALREADY_EXISTS"
+  );
+  await assert.rejects(
+    () => commands.moveTenantToShard({ tenantId: "missing", shardId: "shard-b" }),
+    (error) => error instanceof TenantRouteNotFoundError
+  );
+  await assert.rejects(
+    () => commands.assignTenantToShard({ tenantId: "acme", shardId: " " }),
+    (error) =>
+      error instanceof TenantRouterError && error.code === "INVALID_SHARD_ID"
+  );
 });
 
 let failed = 0;

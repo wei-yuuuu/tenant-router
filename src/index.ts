@@ -58,6 +58,22 @@ export interface RouteEventBus {
   publish?(event: RouteEvent): Promise<void> | void;
 }
 
+export interface RouteEventPublisher {
+  publish(event: RouteEvent): Promise<void> | void;
+}
+
+export interface TenantRouteRegistry<TRoute extends TenantRoute = TenantRoute>
+  extends RouteStore<TRoute>
+{
+  setTenantRoute(route: TRoute): Promise<void> | void;
+  deleteTenantRoute?(tenantId: string): Promise<void> | void;
+}
+
+export interface ShardRegistry {
+  setShard(shard: ShardDefinition): Promise<void> | void;
+  getShard?(shardId: string): Promise<ShardDefinition | null> | ShardDefinition | null;
+}
+
 export interface RouteCache<TRoute extends TenantRoute = TenantRoute> {
   get(tenantId: string): Promise<TRoute | null> | TRoute | null;
   set(route: TRoute): Promise<void> | void;
@@ -96,6 +112,36 @@ export interface MemoryRouteStoreOptions<
   shards?: ShardDefinition[];
 }
 
+export interface TenantRouteCommandsConfig<
+  TRoute extends TenantRoute = TenantRoute
+> {
+  routeRegistry: TenantRouteRegistry<TRoute>;
+  shardRegistry: ShardRegistry;
+  events: RouteEventPublisher;
+  now?: () => Date;
+}
+
+export interface AssignTenantToShardInput<
+  TMetadata = Record<string, unknown>
+> {
+  tenantId: string;
+  shardId: string;
+  tier?: TenantTier;
+  reason?: string;
+  metadata?: TMetadata;
+}
+
+export interface ChangeTenantTierInput {
+  tenantId: string;
+  tier: TenantTier;
+  reason?: string;
+}
+
+export interface DisableTenantInput {
+  tenantId: string;
+  reason?: string;
+}
+
 export class TenantRouteNotFoundError extends Error {
   tenantId: string;
 
@@ -110,6 +156,12 @@ export function createTenantRouter<
   TRoute extends TenantRoute = TenantRoute
 >(config: TenantShardRouterConfig<TRoute>): TenantShardRouter<TRoute> {
   return new TenantShardRouter(config);
+}
+
+export function createTenantRouteCommands<
+  TRoute extends TenantRoute = TenantRoute
+>(config: TenantRouteCommandsConfig<TRoute>): TenantRouteCommands<TRoute> {
+  return new TenantRouteCommands(config);
 }
 
 export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
@@ -257,6 +309,155 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
   }
 }
 
+export class TenantRouteCommands<TRoute extends TenantRoute = TenantRoute> {
+  private readonly routeRegistry: TenantRouteRegistry<TRoute>;
+  private readonly shardRegistry: ShardRegistry;
+  private readonly events: RouteEventPublisher;
+  private readonly now: () => Date;
+
+  constructor(config: TenantRouteCommandsConfig<TRoute>) {
+    if (!config || typeof config !== "object") {
+      throw new TenantRouterError(
+        "INVALID_COMMAND_CONFIG",
+        "Tenant route commands config must be an object."
+      );
+    }
+
+    if (!config.routeRegistry || !config.shardRegistry || !config.events) {
+      throw new TenantRouterError(
+        "INVALID_COMMAND_CONFIG",
+        "Tenant route commands require routeRegistry, shardRegistry, and events."
+      );
+    }
+
+    this.routeRegistry = config.routeRegistry;
+    this.shardRegistry = config.shardRegistry;
+    this.events = config.events;
+    this.now = config.now ?? (() => new Date());
+  }
+
+  async createTenant(
+    input: AssignTenantToShardInput
+  ): Promise<TRoute> {
+    const tenantId = normalizeTenantId(input.tenantId);
+    const existing = await this.routeRegistry.getTenantRoute(tenantId);
+    if (existing) {
+      throw new TenantRouterError(
+        "TENANT_ROUTE_ALREADY_EXISTS",
+        `Tenant route already exists for "${tenantId}".`
+      );
+    }
+
+    return this.writeRoute("tenant.created", input, undefined);
+  }
+
+  async assignTenantToShard(
+    input: AssignTenantToShardInput
+  ): Promise<TRoute> {
+    return this.writeRoute(
+      "tenant.assigned",
+      input,
+      await this.routeRegistry.getTenantRoute(normalizeTenantId(input.tenantId))
+    );
+  }
+
+  async moveTenantToShard(
+    input: AssignTenantToShardInput
+  ): Promise<TRoute> {
+    const existing = await this.requireRoute(input.tenantId);
+    return this.writeRoute("tenant.moved", input, existing);
+  }
+
+  async changeTenantTier(input: ChangeTenantTierInput): Promise<TRoute> {
+    const existing = await this.requireRoute(input.tenantId);
+    const route = {
+      ...existing,
+      tier: input.tier,
+      reason: input.reason ?? existing.reason,
+      routeVersion: existing.routeVersion + 1,
+      updatedAt: this.now()
+    } as TRoute;
+
+    return this.persistAndPublish("tenant.tier_changed", route);
+  }
+
+  async disableTenant(input: DisableTenantInput): Promise<TRoute> {
+    const existing = await this.requireRoute(input.tenantId);
+    const route = {
+      ...existing,
+      status: "disabled",
+      reason: input.reason ?? existing.reason,
+      routeVersion: existing.routeVersion + 1,
+      updatedAt: this.now()
+    } as TRoute;
+
+    return this.persistAndPublish("tenant.disabled", route);
+  }
+
+  async provisionShard(shard: ShardDefinition): Promise<ShardDefinition> {
+    if (!shard || typeof shard !== "object" || !String(shard.id ?? "").trim()) {
+      throw new TenantRouterError(
+        "INVALID_SHARD",
+        "Shard must have a non-empty id."
+      );
+    }
+
+    await this.shardRegistry.setShard(shard);
+    await this.events.publish({
+      type: "shard.provisioned",
+      shardId: shard.id,
+      occurredAt: this.now()
+    });
+    return shard;
+  }
+
+  private async requireRoute(tenantId: string): Promise<TRoute> {
+    const normalizedTenantId = normalizeTenantId(tenantId);
+    const route = await this.routeRegistry.getTenantRoute(normalizedTenantId);
+    if (!route) {
+      throw new TenantRouteNotFoundError(normalizedTenantId);
+    }
+
+    return route;
+  }
+
+  private async writeRoute(
+    type: Extract<RouteEventType, string>,
+    input: AssignTenantToShardInput,
+    previous: TRoute | null | undefined
+  ): Promise<TRoute> {
+    const shardId = normalizeShardId(input.shardId);
+    const route = {
+      tenantId: normalizeTenantId(input.tenantId),
+      shardId,
+      routeVersion: (previous?.routeVersion ?? 0) + 1,
+      tier: input.tier ?? previous?.tier,
+      status: "active",
+      reason: input.reason ?? previous?.reason,
+      metadata: input.metadata ?? previous?.metadata,
+      updatedAt: this.now()
+    } as TRoute;
+
+    return this.persistAndPublish(type, route);
+  }
+
+  private async persistAndPublish(
+    type: RouteEventType,
+    route: TRoute
+  ): Promise<TRoute> {
+    await this.routeRegistry.setTenantRoute(route);
+    await this.events.publish({
+      type,
+      tenantId: route.tenantId,
+      shardId: route.shardId,
+      routeVersion: route.routeVersion,
+      route,
+      occurredAt: this.now()
+    });
+    return route;
+  }
+}
+
 export function createMemoryRouteStore<
   TRoute extends TenantRoute = TenantRoute
 >(options: MemoryRouteStoreOptions<TRoute> = {}): MemoryRouteStore<TRoute> {
@@ -264,7 +465,7 @@ export function createMemoryRouteStore<
 }
 
 export class MemoryRouteStore<TRoute extends TenantRoute = TenantRoute>
-  implements RouteStore<TRoute>
+  implements TenantRouteRegistry<TRoute>, ShardRegistry
 {
   private readonly routes = new Map<string, TRoute>();
   private readonly shards = new Map<string, ShardDefinition>();
@@ -389,6 +590,18 @@ function normalizeTenantId(tenantId: string): string {
   }
 
   return normalizedTenantId;
+}
+
+function normalizeShardId(shardId: string): string {
+  const normalizedShardId = String(shardId ?? "").trim();
+  if (!normalizedShardId) {
+    throw new TenantRouterError(
+      "INVALID_SHARD_ID",
+      "Shard id must be a non-empty string."
+    );
+  }
+
+  return normalizedShardId;
 }
 
 function isRouteCache<TRoute extends TenantRoute>(
