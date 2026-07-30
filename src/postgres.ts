@@ -2,10 +2,13 @@ import { Pool, type PoolConfig, type QueryResultRow } from "pg";
 
 import type {
   RouteStore,
+  RouteEvent,
+  RouteEventPublisher,
   ShardDefinition,
   ShardRegistry,
   TenantRoute,
-  TenantRouteRegistry
+  TenantRouteRegistry,
+  AtomicTenantRouteRegistry
 } from "./index.ts";
 import { TenantRouterError } from "./index.ts";
 
@@ -36,14 +39,18 @@ interface ShardRow extends QueryResultRow {
   metadata: Record<string, unknown> | null;
 }
 
-export function createPostgresRouteStore<
-  TRoute extends TenantRoute = TenantRoute
->(options: PostgresRouteStoreOptions): PostgresRouteStore<TRoute> {
+export function createPostgresRouteStore(
+  options: PostgresRouteStoreOptions
+): PostgresRouteStore {
   return new PostgresRouteStore(options);
 }
 
-export class PostgresRouteStore<TRoute extends TenantRoute = TenantRoute>
-  implements RouteStore<TRoute>, TenantRouteRegistry<TRoute>, ShardRegistry
+export class PostgresRouteStore
+  implements
+    RouteStore,
+    TenantRouteRegistry,
+    AtomicTenantRouteRegistry,
+    ShardRegistry
 {
   private readonly pool: Pool;
   private readonly ownsPool: boolean;
@@ -76,7 +83,7 @@ export class PostgresRouteStore<TRoute extends TenantRoute = TenantRoute>
     this.ownsPool = true;
   }
 
-  async getTenantRoute(tenantId: string): Promise<TRoute | null> {
+  async getTenantRoute(tenantId: string): Promise<TenantRoute | null> {
     const result = await this.pool.query<RouteRow>(
       `SELECT tenant_id, shard_id, route_version, tier, status, reason,
               updated_at, metadata
@@ -85,10 +92,10 @@ export class PostgresRouteStore<TRoute extends TenantRoute = TenantRoute>
       [normalizeId(tenantId, "tenant")]
     );
 
-    return result.rows[0] ? (mapRoute(result.rows[0]) as TRoute) : null;
+    return result.rows[0] ? mapRoute(result.rows[0]) : null;
   }
 
-  async listTenantRoutes(): Promise<TRoute[]> {
+  async listTenantRoutes(): Promise<TenantRoute[]> {
     const result = await this.pool.query<RouteRow>(
       `SELECT tenant_id, shard_id, route_version, tier, status, reason,
               updated_at, metadata
@@ -96,10 +103,10 @@ export class PostgresRouteStore<TRoute extends TenantRoute = TenantRoute>
         ORDER BY tenant_id`
     );
 
-    return result.rows.map((row) => mapRoute(row) as TRoute);
+    return result.rows.map(mapRoute);
   }
 
-  async setTenantRoute(route: TRoute): Promise<void> {
+  async setTenantRoute(route: TenantRoute): Promise<void> {
     await this.pool.query(
       `INSERT INTO tenant_router_routes
         (tenant_id, shard_id, route_version, tier, status, reason, updated_at, metadata)
@@ -131,6 +138,100 @@ export class PostgresRouteStore<TRoute extends TenantRoute = TenantRoute>
       "DELETE FROM tenant_router_routes WHERE tenant_id = $1",
       [normalizeId(tenantId, "tenant")]
     );
+  }
+
+  async persistRouteChange(route: TenantRoute, event: RouteEvent): Promise<void> {
+    const client = await this.pool.connect();
+    const eventId = event.eventId ?? `${route.tenantId}:${route.routeVersion}:${event.type}`;
+
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `INSERT INTO tenant_router_routes
+          (tenant_id, shard_id, route_version, tier, status, reason, updated_at, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           shard_id = EXCLUDED.shard_id,
+           route_version = EXCLUDED.route_version,
+           tier = EXCLUDED.tier,
+           status = EXCLUDED.status,
+           reason = EXCLUDED.reason,
+           updated_at = EXCLUDED.updated_at,
+           metadata = EXCLUDED.metadata
+         WHERE tenant_router_routes.route_version < EXCLUDED.route_version
+         RETURNING tenant_id`,
+        [
+          normalizeId(route.tenantId, "tenant"),
+          normalizeId(route.shardId, "shard"),
+          route.routeVersion,
+          route.tier ?? null,
+          route.status ?? "active",
+          route.reason ?? null,
+          toDate(route.updatedAt),
+          JSON.stringify(route.metadata ?? {})
+        ]
+      );
+
+      if ((result.rowCount ?? 0) > 0) {
+        await client.query(
+          `INSERT INTO tenant_router_route_events
+            (event_id, event_type, tenant_id, route_version, event_json)
+           VALUES ($1, $2, $3, $4, $5::jsonb)
+           ON CONFLICT (event_id) DO NOTHING`,
+          [
+            eventId,
+            event.type,
+            route.tenantId,
+            route.routeVersion,
+            JSON.stringify({ ...event, eventId })
+          ]
+        );
+      }
+
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async markRouteEventPublished(eventId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE tenant_router_route_events
+          SET published_at = now()
+        WHERE event_id = $1 AND published_at IS NULL`,
+      [eventId]
+    );
+  }
+
+  async listPendingRouteEvents(): Promise<RouteEvent[]> {
+    const result = await this.pool.query<{ event_json: RouteEvent }>(
+      `SELECT event_json
+         FROM tenant_router_route_events
+        WHERE published_at IS NULL
+        ORDER BY created_at, event_id`
+    );
+
+    return result.rows.map((row) => row.event_json);
+  }
+
+  async publishPendingRouteEvents(
+    publisher: RouteEventPublisher
+  ): Promise<number> {
+    const pending = await this.listPendingRouteEvents();
+    let published = 0;
+
+    for (const event of pending) {
+      await publisher.publish(event);
+      if (event.eventId) {
+        await this.markRouteEventPublished(event.eventId);
+      }
+      published += 1;
+    }
+
+    return published;
   }
 
   async setShard(shard: ShardDefinition): Promise<void> {

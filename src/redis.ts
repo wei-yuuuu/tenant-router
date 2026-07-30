@@ -1,6 +1,12 @@
 import { createClient } from "redis";
 
-import type { RouteEvent, RouteEventBus, RouteEventHandler, Unsubscribe } from "./index.ts";
+import type {
+  RouteEvent,
+  RouteEventBus,
+  RouteEventHandler,
+  TenantRoute,
+  Unsubscribe
+} from "./index.ts";
 
 type RedisClient = ReturnType<typeof createClient>;
 
@@ -131,10 +137,8 @@ export class RedisRouteEvents implements RouteEventBus {
   }
 
   private async dispatch(payload: string): Promise<void> {
-    let event: RouteEvent;
-    try {
-      event = JSON.parse(payload) as RouteEvent;
-    } catch {
+    const event = parseRouteEvent(payload);
+    if (!event) {
       return;
     }
 
@@ -146,4 +150,47 @@ export class RedisRouteEvents implements RouteEventBus {
       await client.connect();
     }
   }
+}
+
+function parseRouteEvent(payload: string): RouteEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed) || typeof parsed.type !== "string") {
+    return null;
+  }
+
+  const event: RouteEvent = { type: parsed.type };
+  if (typeof parsed.eventId === "string") event.eventId = parsed.eventId;
+  if (typeof parsed.tenantId === "string") event.tenantId = parsed.tenantId;
+  if (typeof parsed.shardId === "string") event.shardId = parsed.shardId;
+  if (typeof parsed.routeVersion === "number") {
+    event.routeVersion = parsed.routeVersion;
+  }
+  if (
+    typeof parsed.occurredAt === "string" ||
+    typeof parsed.occurredAt === "number"
+  ) {
+    event.occurredAt = parsed.occurredAt;
+  }
+  if (isTenantRoute(parsed.route)) event.route = parsed.route;
+  if (isRecord(parsed.metadata)) event.metadata = parsed.metadata;
+  return event;
+}
+
+function isTenantRoute(value: unknown): value is TenantRoute {
+  return (
+    isRecord(value) &&
+    typeof value.tenantId === "string" &&
+    typeof value.shardId === "string" &&
+    typeof value.routeVersion === "number"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

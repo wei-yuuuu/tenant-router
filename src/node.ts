@@ -12,9 +12,9 @@ interface SqliteCacheRow {
   route_json: string;
 }
 
-export function createSqliteRouteCache<
-  TRoute extends TenantRoute = TenantRoute
->(options: SqliteRouteCacheOptions): SqliteRouteCache<TRoute> {
+export function createSqliteRouteCache(
+  options: SqliteRouteCacheOptions
+): SqliteRouteCache {
   return new SqliteRouteCache(options);
 }
 
@@ -22,8 +22,7 @@ export function createSqliteRouteCache<
  * A durable, process-local RouteCache backed by Node's built-in SQLite module.
  * It is a cache only; RouteStore remains the authoritative route source.
  */
-export class SqliteRouteCache<TRoute extends TenantRoute = TenantRoute>
-  implements RouteCache<TRoute>
+export class SqliteRouteCache implements RouteCache
 {
   private readonly database: DatabaseSync;
   private readonly ttlMs?: number;
@@ -58,7 +57,7 @@ export class SqliteRouteCache<TRoute extends TenantRoute = TenantRoute>
     `);
   }
 
-  get(tenantId: string): TRoute | null {
+  get(tenantId: string): TenantRoute | null {
     const normalizedTenantId = normalizeTenantId(tenantId);
     const now = Date.now();
     const row = this.database
@@ -67,10 +66,10 @@ export class SqliteRouteCache<TRoute extends TenantRoute = TenantRoute>
          FROM tenant_router_routes
          WHERE tenant_id = ? AND (expires_at IS NULL OR expires_at > ?)`
       )
-      .get(normalizedTenantId, now) as SqliteCacheRow | undefined;
+      .get(normalizedTenantId, now);
 
-    if (row) {
-      return JSON.parse(row.route_json) as TRoute;
+    if (isSqliteCacheRow(row)) {
+      return parseTenantRoute(row.route_json);
     }
 
     this.database
@@ -81,7 +80,7 @@ export class SqliteRouteCache<TRoute extends TenantRoute = TenantRoute>
     return null;
   }
 
-  set(route: TRoute): void {
+  set(route: TenantRoute): void {
     const tenantId = normalizeTenantId(route.tenantId);
     const now = Date.now();
     const expiresAt = this.ttlMs === undefined ? null : now + this.ttlMs;
@@ -111,6 +110,57 @@ export class SqliteRouteCache<TRoute extends TenantRoute = TenantRoute>
   close(): void {
     this.database.close();
   }
+}
+
+function isSqliteCacheRow(value: unknown): value is SqliteCacheRow {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "route_json" in value &&
+    typeof value.route_json === "string"
+  );
+}
+
+function parseTenantRoute(value: string): TenantRoute | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  if (
+    typeof parsed.tenantId !== "string" ||
+    typeof parsed.shardId !== "string" ||
+    typeof parsed.routeVersion !== "number"
+  ) {
+    return null;
+  }
+
+  const route: TenantRoute = {
+    tenantId: parsed.tenantId,
+    shardId: parsed.shardId,
+    routeVersion: parsed.routeVersion
+  };
+  if (typeof parsed.tier === "string") route.tier = parsed.tier;
+  if (typeof parsed.status === "string") route.status = parsed.status;
+  if (typeof parsed.reason === "string") route.reason = parsed.reason;
+  if (
+    typeof parsed.updatedAt === "string" ||
+    typeof parsed.updatedAt === "number"
+  ) {
+    route.updatedAt = parsed.updatedAt;
+  }
+  if (isRecord(parsed.metadata)) route.metadata = parsed.metadata;
+  return route;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function normalizeTenantId(tenantId: string): string {

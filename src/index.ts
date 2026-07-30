@@ -33,33 +33,39 @@ export type RouteEventType =
   | "route.cache_invalidated"
   | (string & {});
 
-export interface RouteEvent<TMetadata = Record<string, unknown>> {
+export interface RouteEvent<
+  TRoute extends TenantRoute = TenantRoute,
+  TMetadata = Record<string, unknown>
+> {
+  eventId?: string;
   type: RouteEventType;
   tenantId?: string;
   shardId?: string;
   routeVersion?: RouteVersion;
-  route?: TenantRoute;
+  route?: TRoute;
   occurredAt?: Date | string | number;
   metadata?: TMetadata;
 }
 
 export type Unsubscribe = () => void | Promise<void>;
-export type RouteEventHandler = (event: RouteEvent) => void | Promise<void>;
+export type RouteEventHandler<TRoute extends TenantRoute = TenantRoute> = (
+  event: RouteEvent<TRoute>
+) => void | Promise<void>;
 
 export interface RouteStore<TRoute extends TenantRoute = TenantRoute> {
   getTenantRoute(tenantId: string): Promise<TRoute | null> | TRoute | null;
   listTenantRoutes?(): Promise<TRoute[]> | TRoute[];
 }
 
-export interface RouteEventBus {
+export interface RouteEventBus<TRoute extends TenantRoute = TenantRoute> {
   subscribe(
-    handler: RouteEventHandler
+    handler: RouteEventHandler<TRoute>
   ): Promise<Unsubscribe> | Unsubscribe;
-  publish?(event: RouteEvent): Promise<void> | void;
+  publish?(event: RouteEvent<TRoute>): Promise<void> | void;
 }
 
-export interface RouteEventPublisher {
-  publish(event: RouteEvent): Promise<void> | void;
+export interface RouteEventPublisher<TRoute extends TenantRoute = TenantRoute> {
+  publish(event: RouteEvent<TRoute>): Promise<void> | void;
 }
 
 export interface TenantRouteRegistry<TRoute extends TenantRoute = TenantRoute>
@@ -67,6 +73,14 @@ export interface TenantRouteRegistry<TRoute extends TenantRoute = TenantRoute>
 {
   setTenantRoute(route: TRoute): Promise<void> | void;
   deleteTenantRoute?(tenantId: string): Promise<void> | void;
+}
+
+export interface AtomicTenantRouteRegistry<
+  TRoute extends TenantRoute = TenantRoute
+> extends TenantRouteRegistry<TRoute> {
+  persistRouteChange(route: TRoute, event: RouteEvent<TRoute>): Promise<void> | void;
+  markRouteEventPublished?(eventId: string): Promise<void> | void;
+  listPendingRouteEvents?(): Promise<RouteEvent[]> | RouteEvent[];
 }
 
 export interface ShardRegistry {
@@ -89,7 +103,7 @@ export interface TenantShardRouterConfig<
   TRoute extends TenantRoute = TenantRoute
 > {
   routeStore: RouteStore<TRoute>;
-  events?: RouteEventBus;
+  events?: RouteEventBus<TRoute>;
   cache?: RouteCache<TRoute> | MemoryRouteCacheOptions;
 }
 
@@ -112,10 +126,8 @@ export interface MemoryRouteStoreOptions<
   shards?: ShardDefinition[];
 }
 
-export interface TenantRouteCommandsConfig<
-  TRoute extends TenantRoute = TenantRoute
-> {
-  routeRegistry: TenantRouteRegistry<TRoute>;
+export interface TenantRouteCommandsConfig {
+  routeRegistry: TenantRouteRegistry;
   shardRegistry: ShardRegistry;
   events: RouteEventPublisher;
   now?: () => Date;
@@ -158,16 +170,16 @@ export function createTenantRouter<
   return new TenantShardRouter(config);
 }
 
-export function createTenantRouteCommands<
-  TRoute extends TenantRoute = TenantRoute
->(config: TenantRouteCommandsConfig<TRoute>): TenantRouteCommands<TRoute> {
+export function createTenantRouteCommands(
+  config: TenantRouteCommandsConfig
+): TenantRouteCommands {
   return new TenantRouteCommands(config);
 }
 
 export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
   private readonly routeStore: RouteStore<TRoute>;
   private readonly cache: RouteCache<TRoute>;
-  private readonly events?: RouteEventBus;
+  private readonly events?: RouteEventBus<TRoute>;
   private readonly unsubscribeReady?: Promise<Unsubscribe>;
   private unsubscribe?: Unsubscribe;
 
@@ -294,14 +306,14 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
     return route;
   }
 
-  private async handleRouteEvent(event: RouteEvent): Promise<void> {
+  private async handleRouteEvent(event: RouteEvent<TRoute>): Promise<void> {
     const tenantId = event.tenantId ?? event.route?.tenantId;
     if (!tenantId) {
       return;
     }
 
     if (event.route) {
-      await this.cache.set(event.route as TRoute);
+      await this.cache.set(event.route);
       return;
     }
 
@@ -309,13 +321,13 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
   }
 }
 
-export class TenantRouteCommands<TRoute extends TenantRoute = TenantRoute> {
-  private readonly routeRegistry: TenantRouteRegistry<TRoute>;
+export class TenantRouteCommands {
+  private readonly routeRegistry: TenantRouteRegistry;
   private readonly shardRegistry: ShardRegistry;
   private readonly events: RouteEventPublisher;
   private readonly now: () => Date;
 
-  constructor(config: TenantRouteCommandsConfig<TRoute>) {
+  constructor(config: TenantRouteCommandsConfig) {
     if (!config || typeof config !== "object") {
       throw new TenantRouterError(
         "INVALID_COMMAND_CONFIG",
@@ -336,9 +348,7 @@ export class TenantRouteCommands<TRoute extends TenantRoute = TenantRoute> {
     this.now = config.now ?? (() => new Date());
   }
 
-  async createTenant(
-    input: AssignTenantToShardInput
-  ): Promise<TRoute> {
+  async createTenant(input: AssignTenantToShardInput): Promise<TenantRoute> {
     const tenantId = normalizeTenantId(input.tenantId);
     const existing = await this.routeRegistry.getTenantRoute(tenantId);
     if (existing) {
@@ -351,9 +361,7 @@ export class TenantRouteCommands<TRoute extends TenantRoute = TenantRoute> {
     return this.writeRoute("tenant.created", input, undefined);
   }
 
-  async assignTenantToShard(
-    input: AssignTenantToShardInput
-  ): Promise<TRoute> {
+  async assignTenantToShard(input: AssignTenantToShardInput): Promise<TenantRoute> {
     return this.writeRoute(
       "tenant.assigned",
       input,
@@ -361,35 +369,33 @@ export class TenantRouteCommands<TRoute extends TenantRoute = TenantRoute> {
     );
   }
 
-  async moveTenantToShard(
-    input: AssignTenantToShardInput
-  ): Promise<TRoute> {
+  async moveTenantToShard(input: AssignTenantToShardInput): Promise<TenantRoute> {
     const existing = await this.requireRoute(input.tenantId);
     return this.writeRoute("tenant.moved", input, existing);
   }
 
-  async changeTenantTier(input: ChangeTenantTierInput): Promise<TRoute> {
+  async changeTenantTier(input: ChangeTenantTierInput): Promise<TenantRoute> {
     const existing = await this.requireRoute(input.tenantId);
-    const route = {
+    const route: TenantRoute = {
       ...existing,
       tier: input.tier,
       reason: input.reason ?? existing.reason,
       routeVersion: existing.routeVersion + 1,
       updatedAt: this.now()
-    } as TRoute;
+    };
 
     return this.persistAndPublish("tenant.tier_changed", route);
   }
 
-  async disableTenant(input: DisableTenantInput): Promise<TRoute> {
+  async disableTenant(input: DisableTenantInput): Promise<TenantRoute> {
     const existing = await this.requireRoute(input.tenantId);
-    const route = {
+    const route: TenantRoute = {
       ...existing,
       status: "disabled",
       reason: input.reason ?? existing.reason,
       routeVersion: existing.routeVersion + 1,
       updatedAt: this.now()
-    } as TRoute;
+    };
 
     return this.persistAndPublish("tenant.disabled", route);
   }
@@ -411,7 +417,7 @@ export class TenantRouteCommands<TRoute extends TenantRoute = TenantRoute> {
     return shard;
   }
 
-  private async requireRoute(tenantId: string): Promise<TRoute> {
+  private async requireRoute(tenantId: string): Promise<TenantRoute> {
     const normalizedTenantId = normalizeTenantId(tenantId);
     const route = await this.routeRegistry.getTenantRoute(normalizedTenantId);
     if (!route) {
@@ -424,8 +430,8 @@ export class TenantRouteCommands<TRoute extends TenantRoute = TenantRoute> {
   private async writeRoute(
     type: Extract<RouteEventType, string>,
     input: AssignTenantToShardInput,
-    previous: TRoute | null | undefined
-  ): Promise<TRoute> {
+    previous: TenantRoute | null | undefined
+  ): Promise<TenantRoute> {
     const shardId = normalizeShardId(input.shardId);
     const route = {
       tenantId: normalizeTenantId(input.tenantId),
@@ -436,24 +442,38 @@ export class TenantRouteCommands<TRoute extends TenantRoute = TenantRoute> {
       reason: input.reason ?? previous?.reason,
       metadata: input.metadata ?? previous?.metadata,
       updatedAt: this.now()
-    } as TRoute;
+    };
 
     return this.persistAndPublish(type, route);
   }
 
   private async persistAndPublish(
     type: RouteEventType,
-    route: TRoute
-  ): Promise<TRoute> {
-    await this.routeRegistry.setTenantRoute(route);
-    await this.events.publish({
+    route: TenantRoute
+  ): Promise<TenantRoute> {
+    const event: RouteEvent = {
+      eventId: `${route.tenantId}:${route.routeVersion}:${type}`,
       type,
       tenantId: route.tenantId,
       shardId: route.shardId,
       routeVersion: route.routeVersion,
       route,
       occurredAt: this.now()
-    });
+    };
+    const atomicRegistry = isAtomicTenantRouteRegistry(this.routeRegistry)
+      ? this.routeRegistry
+      : null;
+
+    if (atomicRegistry) {
+      await atomicRegistry.persistRouteChange(route, event);
+    } else {
+      await this.routeRegistry.setTenantRoute(route);
+    }
+
+    await this.events.publish(event);
+    if (atomicRegistry?.markRouteEventPublished && event.eventId) {
+      await atomicRegistry.markRouteEventPublished(event.eventId);
+    }
     return route;
   }
 }
@@ -609,9 +629,21 @@ function isRouteCache<TRoute extends TenantRoute>(
 ): cache is RouteCache<TRoute> {
   return (
     !!cache &&
-    typeof (cache as RouteCache<TRoute>).get === "function" &&
-    typeof (cache as RouteCache<TRoute>).set === "function" &&
-    typeof (cache as RouteCache<TRoute>).delete === "function"
+    "get" in cache &&
+    typeof cache.get === "function" &&
+    "set" in cache &&
+    typeof cache.set === "function" &&
+    "delete" in cache &&
+    typeof cache.delete === "function"
+  );
+}
+
+function isAtomicTenantRouteRegistry<TRoute extends TenantRoute>(
+  registry: TenantRouteRegistry<TRoute>
+): registry is AtomicTenantRouteRegistry<TRoute> {
+  return (
+    "persistRouteChange" in registry &&
+    typeof registry.persistRouteChange === "function"
   );
 }
 
@@ -934,7 +966,7 @@ function normalizeConfig<TTenant extends TenantDefinition>(
       ...tenant,
       id,
       enabled: tenant.enabled !== false
-    } as TTenant;
+    };
   });
 
   const fallbackTenantId =
@@ -1325,7 +1357,7 @@ function createHeaderReader(headers: HeaderSource | undefined = undefined): Head
       map.set(String(name).toLowerCase(), normalizeHeaderValue(value));
     }
   } else {
-    for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+    for (const [name, value] of Object.entries(headers)) {
       map.set(String(name).toLowerCase(), normalizeHeaderValue(value));
     }
   }
@@ -1338,15 +1370,15 @@ function createHeaderReader(headers: HeaderSource | undefined = undefined): Head
 }
 
 function isHeadersLike(headers: HeaderSource): headers is HeadersLike {
-  return typeof (headers as { get?: unknown }).get === "function";
+  return typeof Reflect.get(headers, "get") === "function";
 }
 
 function isHeaderIterable(
   headers: HeaderSource
 ): headers is Iterable<[string, string]> {
   return (
-    typeof (headers as { [Symbol.iterator]?: unknown })[Symbol.iterator] ===
-      "function" && !Array.isArray(headers)
+    typeof Reflect.get(headers, Symbol.iterator) === "function" &&
+    !Array.isArray(headers)
   );
 }
 

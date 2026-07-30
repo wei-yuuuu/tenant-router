@@ -167,6 +167,8 @@ Apply [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) bef
 
 The Redis adapter writes each event to a stream and gives every API process its own cursor, so every router receives every route change.
 
+When PostgreSQL is used as the registry, route changes are also written to its outbox in the same transaction. `routeStore.publishPendingRouteEvents(events)` retries events whose Redis publish did not complete.
+
 ```ts
 import { createRedisRouteEvents } from "tenant-router/redis";
 

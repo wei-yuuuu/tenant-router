@@ -419,6 +419,50 @@ test("maps PostgreSQL route rows and uses monotonic route upserts", async () => 
   assert.ok(queries[1].text.includes("route_version < EXCLUDED.route_version"));
 });
 
+test("writes a PostgreSQL route and outbox event in one transaction", async () => {
+  const queries = [];
+  const client = {
+    async query(text, values) {
+      queries.push({ text, values });
+      if (text.includes("RETURNING tenant_id")) {
+        return { rowCount: 1, rows: [{ tenant_id: "acme" }] };
+      }
+      return { rowCount: 0, rows: [] };
+    },
+    release() {}
+  };
+  const pool = {
+    async connect() {
+      return client;
+    },
+    async query() {
+      return { rowCount: 0, rows: [] };
+    },
+    async end() {}
+  };
+  const store = createPostgresRouteStore({ pool });
+
+  await store.persistRouteChange(
+    {
+      tenantId: "acme",
+      shardId: "shard-a",
+      routeVersion: 2
+    },
+    {
+      eventId: "acme:2:tenant.moved",
+      type: "tenant.moved",
+      tenantId: "acme",
+      shardId: "shard-a",
+      routeVersion: 2
+    }
+  );
+
+  assert.equal(queries[0].text, "BEGIN");
+  assert.ok(queries[1].text.includes("tenant_router_routes"));
+  assert.ok(queries[2].text.includes("tenant_router_route_events"));
+  assert.equal(queries[3].text, "COMMIT");
+});
+
 test("publishes and consumes route events through a Redis stream", async () => {
   const messages = [];
   let nextMessageId = 1;

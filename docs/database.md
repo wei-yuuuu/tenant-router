@@ -84,6 +84,20 @@ The PostgreSQL schema is defined in [`migrations/001_tenant_router.sql`](../migr
 | `updated_at` | `TIMESTAMPTZ` | No | Last route update time. |
 | `metadata` | `JSONB` | No | Adapter-specific tenant route metadata. |
 
+### `tenant_router_route_events`
+
+This is the PostgreSQL outbox. A route change and its pending event are inserted in the same transaction. `published_at` stays `NULL` until Redis accepts the event.
+
+| Column | PostgreSQL type | Nullable | Description |
+| --- | --- | --- | --- |
+| `event_id` | `TEXT` | No | Idempotent event identifier, derived from tenant, route version, and event type. |
+| `event_type` | `TEXT` | No | Route event type, such as `tenant.created` or `tenant.moved`. |
+| `tenant_id` | `TEXT` | Yes | Tenant affected by the route event. |
+| `route_version` | `BIGINT` | Yes | Route version carried by the event. |
+| `event_json` | `JSONB` | No | Complete serialized `RouteEvent` payload. |
+| `created_at` | `TIMESTAMPTZ` | No | Time the outbox event was created. |
+| `published_at` | `TIMESTAMPTZ` | Yes | Time Redis accepted the event; `NULL` means pending retry. |
+
 ### Inspect Routes
 
 ```sh
@@ -115,6 +129,22 @@ psql "$ROUTING_DATABASE_URL" -c "
     updated_at
   FROM tenant_router_shards
   ORDER BY shard_id;
+"
+```
+
+### Inspect Pending Events
+
+```sh
+psql "$ROUTING_DATABASE_URL" -c "
+  SELECT
+    event_id,
+    event_type,
+    tenant_id,
+    route_version,
+    created_at
+  FROM tenant_router_route_events
+  WHERE published_at IS NULL
+  ORDER BY created_at, event_id;
 "
 ```
 
