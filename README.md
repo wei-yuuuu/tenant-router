@@ -109,6 +109,8 @@ await events.publish({
 });
 ```
 
+Route versions are monotonic per tenant. An API process serializes event handling and ignores an older event that arrives after a newer route has been observed, so an out-of-order Redis event cannot downgrade or delete a newer cache entry.
+
 ## Core API
 
 - `createTenantRouter(config)` creates a shard route resolver.

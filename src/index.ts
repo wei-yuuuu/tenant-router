@@ -336,6 +336,8 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
   private readonly cache: RouteCache<TRoute>;
   private readonly events?: RouteEventBus<TRoute>;
   private readonly unsubscribeReady?: Promise<Unsubscribe>;
+  private readonly latestRouteVersions = new Map<string, RouteVersion>();
+  private eventQueue: Promise<void> = Promise.resolve();
   private unsubscribe?: Unsubscribe;
 
   constructor(config: TenantShardRouterConfig<TRoute>) {
@@ -361,7 +363,7 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
 
     if (this.events) {
       this.unsubscribeReady = Promise.resolve(
-        this.events.subscribe((event) => this.handleRouteEvent(event))
+        this.events.subscribe((event) => this.queueRouteEvent(event))
       ).then((unsubscribe) => {
         this.unsubscribe = unsubscribe;
         return unsubscribe;
@@ -399,6 +401,7 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
     if (!options.bypassCache) {
       const cached = await this.cache.get(normalizedTenantId);
       if (cached) {
+        this.rememberRouteVersion(cached);
         return {
           tenantId: normalizedTenantId,
           route: cached,
@@ -411,6 +414,7 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
 
     const route = await this.routeStore.getTenantRoute(normalizedTenantId);
     if (route) {
+      this.rememberRouteVersion(route);
       await this.cache.set(route);
       return {
         tenantId: normalizedTenantId,
@@ -440,6 +444,7 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
       await unsubscribe();
       this.unsubscribe = undefined;
     }
+    await this.eventQueue;
   }
 
   private async findRoute(
@@ -449,30 +454,74 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
     if (!options.bypassCache) {
       const cached = await this.cache.get(tenantId);
       if (cached) {
+        this.rememberRouteVersion(cached);
         return cached;
       }
     }
 
     const route = await this.routeStore.getTenantRoute(tenantId);
     if (route) {
+      this.rememberRouteVersion(route);
       await this.cache.set(route);
     }
 
     return route;
   }
 
-  private async handleRouteEvent(event: RouteEvent<TRoute>): Promise<void> {
+  private queueRouteEvent(event: RouteEvent<TRoute>): Promise<void> {
+    const next = this.eventQueue.then(() => this.applyRouteEvent(event));
+    this.eventQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async applyRouteEvent(event: RouteEvent<TRoute>): Promise<void> {
     const tenantId = event.tenantId ?? event.route?.tenantId;
     if (!tenantId) {
       return;
     }
 
+    const cached = await this.cache.get(tenantId);
+    const incomingVersion = event.route?.routeVersion ?? event.routeVersion;
+    const rememberedVersion = this.latestRouteVersions.get(tenantId);
+    const knownVersion =
+      rememberedVersion === undefined
+        ? cached?.routeVersion
+        : cached?.routeVersion === undefined
+          ? rememberedVersion
+          : Math.max(rememberedVersion, cached.routeVersion);
+
+    if (
+      incomingVersion !== undefined &&
+      knownVersion !== undefined &&
+      incomingVersion < knownVersion
+    ) {
+      return;
+    }
+
+    if (
+      incomingVersion !== undefined &&
+      (rememberedVersion === undefined || incomingVersion > rememberedVersion)
+    ) {
+      this.latestRouteVersions.set(tenantId, incomingVersion);
+    }
+
     if (event.route) {
+      this.rememberRouteVersion(event.route);
       await this.cache.set(event.route);
       return;
     }
 
     await this.cache.delete(tenantId);
+  }
+
+  private rememberRouteVersion(route: TenantRoute): void {
+    const rememberedVersion = this.latestRouteVersions.get(route.tenantId);
+    if (
+      rememberedVersion === undefined ||
+      route.routeVersion > rememberedVersion
+    ) {
+      this.latestRouteVersions.set(route.tenantId, route.routeVersion);
+    }
   }
 }
 

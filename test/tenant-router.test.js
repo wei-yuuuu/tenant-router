@@ -230,6 +230,54 @@ test("invalidates cached routes from route events", async () => {
   await router.close();
 });
 
+test("does not let stale route events downgrade or delete newer cache entries", async () => {
+  const routeStore = createMemoryRouteStore({
+    routes: [{ tenantId: "acme", shardId: "shard-a", routeVersion: 1 }]
+  });
+  const events = createMemoryRouteEvents();
+  const router = createTenantRouter({ routeStore, events });
+
+  await router.resolve("acme");
+  routeStore.setTenantRoute({
+    tenantId: "acme",
+    shardId: "shard-c",
+    routeVersion: 3
+  });
+  await events.publish({
+    type: "tenant.moved",
+    tenantId: "acme",
+    shardId: "shard-c",
+    routeVersion: 3,
+    route: {
+      tenantId: "acme",
+      shardId: "shard-c",
+      routeVersion: 3
+    }
+  });
+
+  await events.publish({
+    type: "tenant.moved",
+    tenantId: "acme",
+    shardId: "shard-b",
+    routeVersion: 2,
+    route: {
+      tenantId: "acme",
+      shardId: "shard-b",
+      routeVersion: 2
+    }
+  });
+  await events.publish({
+    type: "route.cache_invalidated",
+    tenantId: "acme",
+    routeVersion: 2
+  });
+
+  assert.equal((await router.explain("acme")).source, "cache");
+  assert.equal((await router.resolve("acme")).shardId, "shard-c");
+
+  await router.close();
+});
+
 test("route events with route payload refresh the cache directly", async () => {
   const routeStore = createMemoryRouteStore({
     routes: [{ tenantId: "free-1", shardId: "shard-old", routeVersion: 1 }]
