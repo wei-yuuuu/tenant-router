@@ -373,6 +373,7 @@ test("commands persist routes and refresh subscribed routers", async () => {
   const router = createTenantRouter({ routeStore: routeRegistry, events });
 
   await commands.provisionShard({ id: "shard-a", region: "ap-northeast-1" });
+  await commands.provisionShard({ id: " shard-b " });
   const created = await commands.createTenant({
     tenantId: "acme",
     shardId: "shard-a",
@@ -429,6 +430,34 @@ test("commands reject duplicate tenant creation and unknown tenant moves", async
     (error) =>
       error instanceof TenantRouterError && error.code === "INVALID_SHARD_ID"
   );
+});
+
+test("commands reject routes for unknown shards and invalid shard load scores", async () => {
+  const routeRegistry = createMemoryRouteStore({
+    shards: [{ id: "shard-a" }],
+    routes: [{ tenantId: "acme", shardId: "shard-a", routeVersion: 1 }]
+  });
+  const commands = createTenantRouteCommands({
+    routeRegistry,
+    shardRegistry: routeRegistry,
+    events: createMemoryRouteEvents()
+  });
+
+  await assert.rejects(
+    () => commands.moveTenantToShard({ tenantId: "acme", shardId: "shard-missing" }),
+    (error) =>
+      error instanceof TenantRouterError && error.code === "SHARD_NOT_FOUND"
+  );
+  await assert.rejects(
+    () => commands.provisionShard({ id: "shard-b", loadScore: 1.1 }),
+    (error) =>
+      error instanceof TenantRouterError &&
+      error.code === "INVALID_SHARD_LOAD_SCORE"
+  );
+
+  const shard = await commands.provisionShard({ id: " shard-b ", loadScore: 0.25 });
+  assert.equal(shard.id, "shard-b");
+  assert.ok(routeRegistry.getShard("shard-b"));
 });
 
 test("builds shard load and topology snapshots from route metadata", async () => {

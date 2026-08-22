@@ -605,17 +605,12 @@ export class TenantRouteCommands {
   }
 
   async provisionShard(shard: ShardDefinition): Promise<ShardDefinition> {
-    if (!shard || typeof shard !== "object" || !String(shard.id ?? "").trim()) {
-      throw new TenantRouterError(
-        "INVALID_SHARD",
-        "Shard must have a non-empty id."
-      );
-    }
+    const normalizedShard = normalizeShardDefinition(shard);
 
     const event: RouteEvent = {
-      eventId: `shard:${shard.id}:provisioned`,
+      eventId: `shard:${normalizedShard.id}:provisioned`,
       type: "shard.provisioned",
-      shardId: shard.id,
+      shardId: normalizedShard.id,
       occurredAt: this.now()
     };
     const atomicRegistry = isAtomicShardRegistry(this.shardRegistry)
@@ -623,16 +618,16 @@ export class TenantRouteCommands {
       : null;
 
     if (atomicRegistry) {
-      await atomicRegistry.persistShardChange(shard, event);
+      await atomicRegistry.persistShardChange(normalizedShard, event);
     } else {
-      await this.shardRegistry.setShard(shard);
+      await this.shardRegistry.setShard(normalizedShard);
     }
 
     await this.events.publish(event);
     if (atomicRegistry?.markRouteEventPublished && event.eventId) {
       await atomicRegistry.markRouteEventPublished(event.eventId);
     }
-    return shard;
+    return normalizedShard;
   }
 
   private async requireRoute(tenantId: string): Promise<TenantRoute> {
@@ -651,6 +646,7 @@ export class TenantRouteCommands {
     previous: TenantRoute | null | undefined
   ): Promise<TenantRoute> {
     const shardId = normalizeShardId(input.shardId);
+    await this.requireShard(shardId);
     const route = {
       tenantId: normalizeTenantId(input.tenantId),
       shardId,
@@ -663,6 +659,21 @@ export class TenantRouteCommands {
     };
 
     return this.persistAndPublish(type, route);
+  }
+
+  private async requireShard(shardId: string): Promise<void> {
+    const getShard = this.shardRegistry.getShard;
+    if (typeof getShard !== "function") {
+      return;
+    }
+
+    const shard = await getShard.call(this.shardRegistry, shardId);
+    if (!shard) {
+      throw new TenantRouterError(
+        "SHARD_NOT_FOUND",
+        `No shard found for "${shardId}".`
+      );
+    }
   }
 
   private async persistAndPublish(
@@ -840,6 +851,28 @@ function normalizeShardId(shardId: string): string {
   }
 
   return normalizedShardId;
+}
+
+function normalizeShardDefinition(shard: ShardDefinition): ShardDefinition {
+  if (!shard || typeof shard !== "object") {
+    throw new TenantRouterError(
+      "INVALID_SHARD",
+      "Shard must be an object."
+    );
+  }
+
+  const id = normalizeShardId(shard.id);
+  if (
+    shard.loadScore !== undefined &&
+    (!Number.isFinite(shard.loadScore) || shard.loadScore < 0 || shard.loadScore > 1)
+  ) {
+    throw new TenantRouterError(
+      "INVALID_SHARD_LOAD_SCORE",
+      "Shard loadScore must be between 0 and 1."
+    );
+  }
+
+  return { ...shard, id };
 }
 
 function isRouteCache<TRoute extends TenantRoute>(

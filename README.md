@@ -171,6 +171,8 @@ Commands also provide `assignTenantToShard`, `changeTenantTier`, and `disableTen
 
 Shard definitions may include `capacity` and `loadScore` (`0.0` to `1.0`) for operator observability. These values do not currently change routing automatically; `TenantRoute.shardId` remains the routing source.
 
+When the shard registry supports `getShard()`, route commands reject assignments to unknown shards. Shard provisioning trims the shard id and validates that `loadScore` stays between `0.0` and `1.0`.
+
 Official adapters should implement the core interfaces:
 
 - `createSqliteRouteCache(...)` implements `RouteCache` and is available from `tenant-router/node`.
