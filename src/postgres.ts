@@ -47,6 +47,11 @@ interface ShardRow extends QueryResultRow {
   metadata: Record<string, unknown> | null;
 }
 
+interface PendingRouteEventRow extends QueryResultRow {
+  event_id: string;
+  event_json: RouteEvent;
+}
+
 export function createPostgresRouteStore(
   options: PostgresRouteStoreOptions
 ): PostgresRouteStore {
@@ -216,35 +221,44 @@ export class PostgresRouteStore
     );
   }
 
-  async listPendingRouteEvents(limit = 100): Promise<RouteEvent[]> {
-    const result = await this.pool.query<{ event_json: RouteEvent }>(
-      `SELECT event_json
-         FROM tenant_router_route_events
-        WHERE published_at IS NULL
-        ORDER BY created_at, event_id
-        LIMIT $1`,
-      [normalizeLimit(limit)]
-    );
-
-    return result.rows.map((row) => row.event_json);
-  }
-
   async publishPendingRouteEvents(
     publisher: RouteEventPublisher,
     limit = 100
   ): Promise<number> {
-    const pending = await this.listPendingRouteEvents(limit);
-    let published = 0;
+    const client = await this.pool.connect();
 
-    for (const event of pending) {
-      await publisher.publish(event);
-      if (event.eventId) {
-        await this.markRouteEventPublished(event.eventId);
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<PendingRouteEventRow>(
+        `SELECT event_id, event_json
+           FROM tenant_router_route_events
+          WHERE published_at IS NULL
+          ORDER BY created_at, event_id
+          LIMIT $1
+          FOR UPDATE SKIP LOCKED`,
+        [normalizeLimit(limit)]
+      );
+      let published = 0;
+
+      for (const row of result.rows) {
+        await publisher.publish(row.event_json);
+        await client.query(
+          `UPDATE tenant_router_route_events
+              SET published_at = now()
+            WHERE event_id = $1 AND published_at IS NULL`,
+          [row.event_id]
+        );
+        published += 1;
       }
-      published += 1;
-    }
 
-    return published;
+      await client.query("COMMIT");
+      return published;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async setShard(shard: ShardDefinition): Promise<void> {

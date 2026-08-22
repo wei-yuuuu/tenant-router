@@ -69,7 +69,6 @@ export interface RouteEventPublisher<TRoute extends TenantRoute = TenantRoute> {
 }
 
 export interface RouteEventOutbox {
-  listPendingRouteEvents?(limit?: number): Promise<RouteEvent[]> | RouteEvent[];
   publishPendingRouteEvents(
     publisher: RouteEventPublisher,
     limit?: number

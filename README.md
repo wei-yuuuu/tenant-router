@@ -222,6 +222,8 @@ await events.close();
 await routeStore.close();
 ```
 
+The PostgreSQL outbox publisher claims rows inside a transaction with `FOR UPDATE SKIP LOCKED`, so multiple worker instances can process separate batches. Delivery remains at-least-once: a crash after Redis accepts an event but before PostgreSQL marks it published can produce a duplicate, which consumers should handle through `eventId` and route-version checks.
+
 ## SQLite Cache
 
 Use the Node-only SQLite adapter when a process should retain its local cache across restarts. It remains a cache: PostgreSQL will remain the authoritative `RouteStore`.

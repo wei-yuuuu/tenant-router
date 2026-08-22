@@ -619,6 +619,60 @@ test("writes a PostgreSQL shard and outbox event in one transaction", async () =
   assert.equal(queries[3].text, "COMMIT");
 });
 
+test("claims PostgreSQL outbox batches with row locks", async () => {
+  const queries = [];
+  const client = {
+    async query(text, values) {
+      queries.push({ text, values });
+      if (text.includes("FOR UPDATE SKIP LOCKED")) {
+        return {
+          rows: [
+            {
+              event_id: "acme:2:tenant.moved",
+              event_json: {
+                eventId: "acme:2:tenant.moved",
+                type: "tenant.moved",
+                tenantId: "acme",
+                shardId: "shard-b",
+                routeVersion: 2
+              }
+            }
+          ]
+        };
+      }
+      return { rows: [] };
+    },
+    release() {}
+  };
+  const pool = {
+    async connect() {
+      return client;
+    },
+    async query() {
+      throw new Error("outbox publishing should use the claimed client");
+    },
+    async end() {}
+  };
+  const store = createPostgresRouteStore({ pool });
+  const published = [];
+
+  const count = await store.publishPendingRouteEvents(
+    {
+      async publish(event) {
+        published.push(event);
+      }
+    },
+    10
+  );
+
+  assert.equal(count, 1);
+  assert.equal(published[0].eventId, "acme:2:tenant.moved");
+  assert.equal(queries[0].text, "BEGIN");
+  assert.ok(queries[1].text.includes("FOR UPDATE SKIP LOCKED"));
+  assert.ok(queries[2].text.includes("published_at"));
+  assert.equal(queries[3].text, "COMMIT");
+});
+
 test("commands use atomic shard registries when available", async () => {
   const persisted = [];
   const events = createMemoryRouteEvents();

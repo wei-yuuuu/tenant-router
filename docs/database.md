@@ -88,6 +88,8 @@ The PostgreSQL schema is defined in [`migrations/001_tenant_router.sql`](../migr
 
 This is the PostgreSQL outbox. A tenant route or shard change and its pending event are inserted in the same transaction. `published_at` stays `NULL` until Redis accepts the event.
 
+The publisher claims pending rows with `FOR UPDATE SKIP LOCKED`, allowing multiple outbox workers to process separate batches. Delivery is at-least-once; `event_id` and `route_version` let consumers ignore duplicate or stale events.
+
 | Column | PostgreSQL type | Nullable | Description |
 | --- | --- | --- | --- |
 | `event_id` | `TEXT` | No | Idempotent event identifier, derived from tenant, route version, and event type. |
