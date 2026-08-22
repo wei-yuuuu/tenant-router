@@ -93,11 +93,43 @@ export interface AtomicTenantRouteRegistry<
 export interface ShardRegistry {
   setShard(shard: ShardDefinition): Promise<void> | void;
   getShard?(shardId: string): Promise<ShardDefinition | null> | ShardDefinition | null;
+  listShards?(): Promise<ShardDefinition[]> | ShardDefinition[];
 }
 
 export interface AtomicShardRegistry extends ShardRegistry {
   persistShardChange(shard: ShardDefinition, event: RouteEvent): Promise<void> | void;
   markRouteEventPublished?(eventId: string): Promise<void> | void;
+}
+
+export interface ShardLoad {
+  shard: ShardDefinition;
+  tenantCount: number;
+  loadScore: number | null;
+}
+
+export interface ShardTopology<TRoute extends TenantRoute = TenantRoute> {
+  shard: ShardDefinition;
+  tenants: TRoute[];
+  tenantCount: number;
+}
+
+export interface TopologySnapshot<TRoute extends TenantRoute = TenantRoute> {
+  generatedAt: Date;
+  shards: ShardTopology<TRoute>[];
+  unassignedRoutes: TRoute[];
+}
+
+export interface RouteTopologyQueries<TRoute extends TenantRoute = TenantRoute> {
+  getShardLoad(shardId: string): Promise<ShardLoad | null> | ShardLoad | null;
+  getTopologySnapshot():
+    | Promise<TopologySnapshot<TRoute>>
+    | TopologySnapshot<TRoute>;
+}
+
+export interface RouteTopologyReaderConfig<TRoute extends TenantRoute = TenantRoute> {
+  routeStore: RouteStore<TRoute>;
+  shardRegistry: ShardRegistry;
+  now?: () => Date;
 }
 
 export interface RouteCache<TRoute extends TenantRoute = TenantRoute> {
@@ -186,6 +218,117 @@ export function createTenantRouteCommands(
   config: TenantRouteCommandsConfig
 ): TenantRouteCommands {
   return new TenantRouteCommands(config);
+}
+
+export function createRouteTopologyReader<
+  TRoute extends TenantRoute = TenantRoute
+>(config: RouteTopologyReaderConfig<TRoute>): RouteTopologyQueries<TRoute> {
+  return new RouteTopologyReader(config);
+}
+
+export class RouteTopologyReader<TRoute extends TenantRoute = TenantRoute>
+  implements RouteTopologyQueries<TRoute>
+{
+  private readonly routeStore: RouteStore<TRoute>;
+  private readonly shardRegistry: ShardRegistry;
+  private readonly now: () => Date;
+
+  constructor(config: RouteTopologyReaderConfig<TRoute>) {
+    if (!config || typeof config !== "object") {
+      throw new TenantRouterError(
+        "INVALID_TOPOLOGY_CONFIG",
+        "Route topology reader config must be an object."
+      );
+    }
+
+    if (!config.routeStore || !config.shardRegistry) {
+      throw new TenantRouterError(
+        "INVALID_TOPOLOGY_CONFIG",
+        "Route topology reader requires routeStore and shardRegistry."
+      );
+    }
+
+    this.routeStore = config.routeStore;
+    this.shardRegistry = config.shardRegistry;
+    this.now = config.now ?? (() => new Date());
+  }
+
+  async getShardLoad(shardId: string): Promise<ShardLoad | null> {
+    const normalizedShardId = normalizeShardId(shardId);
+    const [shards, routes] = await Promise.all([
+      this.readShards(),
+      this.readTenantRoutes()
+    ]);
+    const shard = shards.find((candidate) => candidate.id === normalizedShardId);
+
+    if (!shard) {
+      return null;
+    }
+
+    return {
+      shard,
+      tenantCount: routes.filter((route) => route.shardId === shard.id).length,
+      loadScore: shard.loadScore ?? null
+    };
+  }
+
+  async getTopologySnapshot(): Promise<TopologySnapshot<TRoute>> {
+    const [shards, routes] = await Promise.all([
+      this.readShards(),
+      this.readTenantRoutes()
+    ]);
+    const knownShardIds = new Set(shards.map((shard) => shard.id));
+    const routesByShard = new Map<string, TRoute[]>();
+    const unassignedRoutes: TRoute[] = [];
+
+    for (const route of routes) {
+      if (!knownShardIds.has(route.shardId)) {
+        unassignedRoutes.push(route);
+        continue;
+      }
+
+      const shardRoutes = routesByShard.get(route.shardId) ?? [];
+      shardRoutes.push(route);
+      routesByShard.set(route.shardId, shardRoutes);
+    }
+
+    return {
+      generatedAt: this.now(),
+      shards: shards.map((shard) => {
+        const tenants = routesByShard.get(shard.id) ?? [];
+        return {
+          shard,
+          tenants,
+          tenantCount: tenants.length
+        };
+      }),
+      unassignedRoutes
+    };
+  }
+
+  private async readTenantRoutes(): Promise<TRoute[]> {
+    const listTenantRoutes = this.routeStore.listTenantRoutes;
+    if (typeof listTenantRoutes !== "function") {
+      throw new TenantRouterError(
+        "ROUTE_LIST_UNAVAILABLE",
+        "Route topology reader requires routeStore.listTenantRoutes()."
+      );
+    }
+
+    return await listTenantRoutes.call(this.routeStore);
+  }
+
+  private async readShards(): Promise<ShardDefinition[]> {
+    const listShards = this.shardRegistry.listShards;
+    if (typeof listShards !== "function") {
+      throw new TenantRouterError(
+        "SHARD_LIST_UNAVAILABLE",
+        "Route topology reader requires shardRegistry.listShards()."
+      );
+    }
+
+    return await listShards.call(this.shardRegistry);
+  }
 }
 
 export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {

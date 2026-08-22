@@ -19,6 +19,8 @@ flowchart TB
   subgraph ControlPlane["Control plane"]
     direction RL
     Operator["TenantRouteCommands (operator)"] -->|"[1] create tenant / move tenant / provision shard"| Store["PostgresRouteStore (RouteStore + outbox)"]
+    Operator -->|"[read] shard load / topology"| Queries["RouteTopologyReader"]
+    Queries -->|"list route + shard metadata"| Store
     Store -->|"pending outbox events"| Worker["PostgresOutboxWorker"]
     Worker -->|"[2] publish RouteEvent"| Redis["Redis route events"]
     Redis -->|"consume event"| Broker["RouteEventBus (broker)"]
@@ -116,6 +118,27 @@ await events.publish({
 - `router.invalidate(tenantId)` manually clears one cached route.
 - `router.close()` unsubscribes from route events.
 
+## Operator Queries
+
+`RouteTopologyReader` is the read-only control-plane view used by operator tooling. It combines `tenant_router_routes` with `tenant_router_shards` and does not change routing.
+
+```ts
+import { createRouteTopologyReader } from "tenant-router";
+
+const topologyReader = createRouteTopologyReader({
+  routeStore,
+  shardRegistry: routeStore
+});
+
+const shardLoad = await topologyReader.getShardLoad("shard-a");
+const snapshot = await topologyReader.getTopologySnapshot();
+
+console.log(shardLoad?.tenantCount, shardLoad?.loadScore);
+console.log(snapshot.shards, snapshot.unassignedRoutes);
+```
+
+`tenantCount` counts current tenant-to-shard mappings. `loadScore` is the persisted operator metric from the shard definition; it is not calculated automatically and does not override `TenantRoute.shardId`.
+
 ## Route Commands
 
 `TenantRouteCommands` is the control-plane API. It writes a route first, then publishes an event that refreshes each subscribed router cache.
@@ -148,9 +171,9 @@ Shard definitions may include `capacity` and `loadScore` (`0.0` to `1.0`) for op
 
 Official adapters should implement the core interfaces:
 
-- `sqliteRouteCache(...)` implements `RouteCache` and is available from `tenant-router/node`.
-- `postgresRouteStore(...)` implements `RouteStore`, `TenantRouteRegistry`, and `ShardRegistry`, and is available from `tenant-router/postgres`.
-- `redisRouteEvents(...)` implements `RouteEventBus` through Redis Streams and is available from `tenant-router/redis`.
+- `createSqliteRouteCache(...)` implements `RouteCache` and is available from `tenant-router/node`.
+- `createPostgresRouteStore(...)` implements `RouteStore`, `TenantRouteRegistry`, and `ShardRegistry`, and is available from `tenant-router/postgres`.
+- `createRedisRouteEvents(...)` implements `RouteEventBus` through Redis Streams and is available from `tenant-router/redis`.
 
 ```ts
 import {

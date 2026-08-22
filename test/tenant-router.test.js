@@ -6,6 +6,7 @@ import { join } from "path";
 import {
   TenantRouteNotFoundError,
   TenantRouterError,
+  createRouteTopologyReader,
   createTenantRouteCommands,
   createMemoryRouteEvents,
   createMemoryRouteStore,
@@ -380,6 +381,46 @@ test("commands reject duplicate tenant creation and unknown tenant moves", async
     (error) =>
       error instanceof TenantRouterError && error.code === "INVALID_SHARD_ID"
   );
+});
+
+test("builds shard load and topology snapshots from route metadata", async () => {
+  const routeStore = createMemoryRouteStore({
+    shards: [
+      { id: "shard-a", capacity: 100, loadScore: 0.42 },
+      { id: "shard-b", status: "draining" }
+    ],
+    routes: [
+      { tenantId: "acme", shardId: "shard-a", routeVersion: 1 },
+      { tenantId: "beta", shardId: "shard-a", routeVersion: 2 },
+      { tenantId: "orphan", shardId: "shard-missing", routeVersion: 1 }
+    ]
+  });
+  const reader = createRouteTopologyReader({
+    routeStore,
+    shardRegistry: routeStore,
+    now: () => new Date("2026-07-23T00:00:00.000Z")
+  });
+
+  const load = await reader.getShardLoad("shard-a");
+  assert.equal(load.shard.id, "shard-a");
+  assert.equal(load.tenantCount, 2);
+  assert.equal(load.loadScore, 0.42);
+  assert.equal(await reader.getShardLoad("shard-missing"), null);
+
+  const snapshot = await reader.getTopologySnapshot();
+  assert.equal(snapshot.generatedAt.toISOString(), "2026-07-23T00:00:00.000Z");
+  assert.deepEqual(
+    snapshot.shards.map((entry) => [entry.shard.id, entry.tenantCount]),
+    [
+      ["shard-a", 2],
+      ["shard-b", 0]
+    ]
+  );
+  assert.deepEqual(
+    snapshot.shards[0].tenants.map((route) => route.tenantId),
+    ["acme", "beta"]
+  );
+  assert.equal(snapshot.unassignedRoutes[0].tenantId, "orphan");
 });
 
 test("maps PostgreSQL route rows and uses monotonic route upserts", async () => {
