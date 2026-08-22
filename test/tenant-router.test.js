@@ -202,6 +202,22 @@ test("explains cache hits after the first route store lookup", async () => {
   assert.equal(second.routeVersion, 7);
 });
 
+test("warms the route cache from the route store", async () => {
+  const routeStore = createMemoryRouteStore({
+    routes: [
+      { tenantId: "acme", shardId: "shard-a", routeVersion: 1 },
+      { tenantId: "beta", shardId: "shard-b", routeVersion: 2 }
+    ]
+  });
+  const router = createTenantRouter({ routeStore });
+
+  assert.equal(await router.warmup(), 2);
+  assert.equal((await router.explain("acme")).source, "cache");
+  assert.equal((await router.explain("beta")).source, "cache");
+
+  await router.close();
+});
+
 test("invalidates cached routes from route events", async () => {
   const routeStore = createMemoryRouteStore({
     routes: [{ tenantId: "enterprise", shardId: "shard-1", routeVersion: 1 }]

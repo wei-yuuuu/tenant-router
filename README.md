@@ -116,9 +116,12 @@ Route versions are monotonic per tenant. An API process serializes event handlin
 - `createTenantRouter(config)` creates a shard route resolver.
 - `router.resolve(tenantId)` returns the active `TenantRoute` or throws `TenantRouteNotFoundError`.
 - `router.getRoute(tenantId)` returns the active route or `null`.
+- `router.warmup()` preloads all routes when the store implements `listTenantRoutes()`.
 - `router.explain(tenantId)` reports whether the route came from cache or store.
 - `router.invalidate(tenantId)` manually clears one cached route.
 - `router.close()` unsubscribes from route events.
+
+Route warmup is optional. It is useful for memory caches during startup; the SQLite cache already persists entries across process restarts.
 
 ## Operator Queries
 

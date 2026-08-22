@@ -391,6 +391,36 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
     return this.findRoute(normalizeTenantId(tenantId), options);
   }
 
+  async warmup(): Promise<number> {
+    return this.queueTask(async () => {
+      const listTenantRoutes = this.routeStore.listTenantRoutes;
+      if (typeof listTenantRoutes !== "function") {
+        throw new TenantRouterError(
+          "ROUTE_LIST_UNAVAILABLE",
+          "Tenant router warmup requires routeStore.listTenantRoutes()."
+        );
+      }
+
+      const routes = await listTenantRoutes.call(this.routeStore);
+      let loaded = 0;
+      for (const route of routes) {
+        const rememberedVersion = this.latestRouteVersions.get(route.tenantId);
+        if (
+          rememberedVersion !== undefined &&
+          route.routeVersion < rememberedVersion
+        ) {
+          continue;
+        }
+
+        this.rememberRouteVersion(route);
+        await this.cache.set(route);
+        loaded += 1;
+      }
+
+      return loaded;
+    });
+  }
+
   async explain(
     tenantId: string,
     options: ResolveRouteOptions = {}
@@ -468,8 +498,15 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
   }
 
   private queueRouteEvent(event: RouteEvent<TRoute>): Promise<void> {
-    const next = this.eventQueue.then(() => this.applyRouteEvent(event));
-    this.eventQueue = next.catch(() => undefined);
+    return this.queueTask(() => this.applyRouteEvent(event));
+  }
+
+  private queueTask<TResult>(task: () => Promise<TResult>): Promise<TResult> {
+    const next = this.eventQueue.then(task);
+    this.eventQueue = next.then(
+      () => undefined,
+      () => undefined
+    );
     return next;
   }
 
