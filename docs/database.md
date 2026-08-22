@@ -86,13 +86,13 @@ The PostgreSQL schema is defined in [`migrations/001_tenant_router.sql`](../migr
 
 ### `tenant_router_route_events`
 
-This is the PostgreSQL outbox. A route change and its pending event are inserted in the same transaction. `published_at` stays `NULL` until Redis accepts the event.
+This is the PostgreSQL outbox. A tenant route or shard change and its pending event are inserted in the same transaction. `published_at` stays `NULL` until Redis accepts the event.
 
 | Column | PostgreSQL type | Nullable | Description |
 | --- | --- | --- | --- |
 | `event_id` | `TEXT` | No | Idempotent event identifier, derived from tenant, route version, and event type. |
 | `event_type` | `TEXT` | No | Route event type, such as `tenant.created` or `tenant.moved`. |
-| `tenant_id` | `TEXT` | Yes | Tenant affected by the route event. |
+| `tenant_id` | `TEXT` | Yes | Tenant affected by the route event; `NULL` for shard events. |
 | `route_version` | `BIGINT` | Yes | Route version carried by the event. |
 | `event_json` | `JSONB` | No | Complete serialized `RouteEvent` payload. |
 | `created_at` | `TIMESTAMPTZ` | No | Time the outbox event was created. |

@@ -142,7 +142,9 @@ await commands.moveTenantToShard({
 });
 ```
 
-Commands also provide `assignTenantToShard`, `changeTenantTier`, and `disableTenant`. The PostgreSQL adapter uses a transaction/outbox so the route write and eventual Redis event publication remain recoverable.
+Commands also provide `assignTenantToShard`, `changeTenantTier`, and `disableTenant`. Tenant route changes and shard provisioning use a PostgreSQL transaction/outbox so the metadata write and eventual Redis event publication remain recoverable.
+
+Shard definitions may include `capacity` and `loadScore` (`0.0` to `1.0`) for operator observability. These values do not currently change routing automatically; `TenantRoute.shardId` remains the routing source.
 
 Official adapters should implement the core interfaces:
 
@@ -177,7 +179,7 @@ Apply [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) bef
 
 The Redis adapter writes each event to a stream and gives every API process its own cursor, so every router receives every route change.
 
-When PostgreSQL is used as the registry, route changes are also written to its outbox in the same transaction. Use the worker to retry events whose Redis publish did not complete:
+When PostgreSQL is used as the registry, tenant route changes and shard provisioning are also written to its outbox in the same transaction. Use the worker to retry events whose Redis publish did not complete:
 
 ```ts
 const outboxWorker = createPostgresOutboxWorker(routeStore, events, {

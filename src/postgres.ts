@@ -9,7 +9,8 @@ import type {
   ShardRegistry,
   TenantRoute,
   TenantRouteRegistry,
-  AtomicTenantRouteRegistry
+  AtomicTenantRouteRegistry,
+  AtomicShardRegistry
 } from "./index.ts";
 import { TenantRouterError } from "./index.ts";
 
@@ -58,6 +59,7 @@ export class PostgresRouteStore
     TenantRouteRegistry,
     AtomicTenantRouteRegistry,
     RouteEventOutbox,
+    AtomicShardRegistry,
     ShardRegistry
 {
   private readonly pool: Pool;
@@ -268,6 +270,53 @@ export class PostgresRouteStore
         JSON.stringify(shard.metadata ?? {})
       ]
     );
+  }
+
+  async persistShardChange(
+    shard: ShardDefinition,
+    event: RouteEvent
+  ): Promise<void> {
+    const client = await this.pool.connect();
+    const eventId = event.eventId ?? `shard:${shard.id}:provisioned`;
+
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO tenant_router_shards
+          (shard_id, name, status, region, capacity, load_score, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+         ON CONFLICT (shard_id) DO UPDATE SET
+           name = EXCLUDED.name,
+           status = EXCLUDED.status,
+           region = EXCLUDED.region,
+           capacity = EXCLUDED.capacity,
+           load_score = EXCLUDED.load_score,
+           metadata = EXCLUDED.metadata,
+           updated_at = now()`,
+        [
+          normalizeId(shard.id, "shard"),
+          shard.name ?? null,
+          shard.status ?? "active",
+          shard.region ?? null,
+          shard.capacity ?? null,
+          shard.loadScore ?? null,
+          JSON.stringify(shard.metadata ?? {})
+        ]
+      );
+      await client.query(
+        `INSERT INTO tenant_router_route_events
+          (event_id, event_type, route_version, event_json)
+         VALUES ($1, $2, $3, $4::jsonb)
+         ON CONFLICT (event_id) DO NOTHING`,
+        [eventId, event.type, null, JSON.stringify({ ...event, eventId })]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async getShard(shardId: string): Promise<ShardDefinition | null> {

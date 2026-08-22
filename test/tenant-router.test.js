@@ -466,6 +466,68 @@ test("writes a PostgreSQL route and outbox event in one transaction", async () =
   assert.equal(queries[3].text, "COMMIT");
 });
 
+test("writes a PostgreSQL shard and outbox event in one transaction", async () => {
+  const queries = [];
+  const client = {
+    async query(text, values) {
+      queries.push({ text, values });
+      return { rowCount: 1, rows: [] };
+    },
+    release() {}
+  };
+  const pool = {
+    async connect() {
+      return client;
+    },
+    async query() {
+      return { rowCount: 0, rows: [] };
+    },
+    async end() {}
+  };
+  const store = createPostgresRouteStore({ pool });
+
+  await store.persistShardChange(
+    { id: "shard-a", region: "ap-northeast-1" },
+    {
+      eventId: "shard:shard-a:provisioned",
+      type: "shard.provisioned",
+      shardId: "shard-a"
+    }
+  );
+
+  assert.equal(queries[0].text, "BEGIN");
+  assert.ok(queries[1].text.includes("tenant_router_shards"));
+  assert.ok(queries[2].text.includes("tenant_router_route_events"));
+  assert.equal(queries[3].text, "COMMIT");
+});
+
+test("commands use atomic shard registries when available", async () => {
+  const persisted = [];
+  const events = createMemoryRouteEvents();
+  const registry = {
+    async getTenantRoute() {
+      return null;
+    },
+    async setShard() {
+      throw new Error("non-atomic shard path should not be used");
+    },
+    async persistShardChange(shard, event) {
+      persisted.push({ shard, event });
+    }
+  };
+  const commands = createTenantRouteCommands({
+    routeRegistry: registry,
+    shardRegistry: registry,
+    events
+  });
+
+  await commands.provisionShard({ id: "shard-a" });
+
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].event.type, "shard.provisioned");
+  assert.equal(persisted[0].event.eventId, "shard:shard-a:provisioned");
+});
+
 test("outbox worker publishes batches and stops its timer", async () => {
   const published = [];
   const calls = [];

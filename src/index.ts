@@ -95,6 +95,11 @@ export interface ShardRegistry {
   getShard?(shardId: string): Promise<ShardDefinition | null> | ShardDefinition | null;
 }
 
+export interface AtomicShardRegistry extends ShardRegistry {
+  persistShardChange(shard: ShardDefinition, event: RouteEvent): Promise<void> | void;
+  markRouteEventPublished?(eventId: string): Promise<void> | void;
+}
+
 export interface RouteCache<TRoute extends TenantRoute = TenantRoute> {
   get(tenantId: string): Promise<TRoute | null> | TRoute | null;
   set(route: TRoute): Promise<void> | void;
@@ -415,12 +420,26 @@ export class TenantRouteCommands {
       );
     }
 
-    await this.shardRegistry.setShard(shard);
-    await this.events.publish({
+    const event: RouteEvent = {
+      eventId: `shard:${shard.id}:provisioned`,
       type: "shard.provisioned",
       shardId: shard.id,
       occurredAt: this.now()
-    });
+    };
+    const atomicRegistry = isAtomicShardRegistry(this.shardRegistry)
+      ? this.shardRegistry
+      : null;
+
+    if (atomicRegistry) {
+      await atomicRegistry.persistShardChange(shard, event);
+    } else {
+      await this.shardRegistry.setShard(shard);
+    }
+
+    await this.events.publish(event);
+    if (atomicRegistry?.markRouteEventPublished && event.eventId) {
+      await atomicRegistry.markRouteEventPublished(event.eventId);
+    }
     return shard;
   }
 
@@ -651,6 +670,15 @@ function isAtomicTenantRouteRegistry<TRoute extends TenantRoute>(
   return (
     "persistRouteChange" in registry &&
     typeof registry.persistRouteChange === "function"
+  );
+}
+
+function isAtomicShardRegistry(
+  registry: ShardRegistry
+): registry is AtomicShardRegistry {
+  return (
+    "persistShardChange" in registry &&
+    typeof registry.persistShardChange === "function"
   );
 }
 
