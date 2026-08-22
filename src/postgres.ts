@@ -4,6 +4,7 @@ import type {
   RouteStore,
   RouteEvent,
   RouteEventPublisher,
+  RouteEventOutbox,
   ShardDefinition,
   ShardRegistry,
   TenantRoute,
@@ -16,6 +17,12 @@ export interface PostgresRouteStoreOptions {
   connectionString?: string;
   pool?: Pool;
   poolConfig?: Omit<PoolConfig, "connectionString">;
+}
+
+export interface PostgresOutboxWorkerOptions {
+  intervalMs?: number;
+  batchSize?: number;
+  onError?: (error: unknown) => void | Promise<void>;
 }
 
 interface RouteRow extends QueryResultRow {
@@ -50,6 +57,7 @@ export class PostgresRouteStore
     RouteStore,
     TenantRouteRegistry,
     AtomicTenantRouteRegistry,
+    RouteEventOutbox,
     ShardRegistry
 {
   private readonly pool: Pool;
@@ -206,21 +214,24 @@ export class PostgresRouteStore
     );
   }
 
-  async listPendingRouteEvents(): Promise<RouteEvent[]> {
+  async listPendingRouteEvents(limit = 100): Promise<RouteEvent[]> {
     const result = await this.pool.query<{ event_json: RouteEvent }>(
       `SELECT event_json
          FROM tenant_router_route_events
         WHERE published_at IS NULL
-        ORDER BY created_at, event_id`
+        ORDER BY created_at, event_id
+        LIMIT $1`,
+      [normalizeLimit(limit)]
     );
 
     return result.rows.map((row) => row.event_json);
   }
 
   async publishPendingRouteEvents(
-    publisher: RouteEventPublisher
+    publisher: RouteEventPublisher,
+    limit = 100
   ): Promise<number> {
-    const pending = await this.listPendingRouteEvents();
+    const pending = await this.listPendingRouteEvents(limit);
     let published = 0;
 
     for (const event of pending) {
@@ -287,6 +298,96 @@ export class PostgresRouteStore
   }
 }
 
+export function createPostgresOutboxWorker(
+  outbox: RouteEventOutbox,
+  publisher: RouteEventPublisher,
+  options: PostgresOutboxWorkerOptions = {}
+): PostgresOutboxWorker {
+  return new PostgresOutboxWorker(outbox, publisher, options);
+}
+
+export class PostgresOutboxWorker {
+  private readonly outbox: RouteEventOutbox;
+  private readonly publisher: RouteEventPublisher;
+  private readonly intervalMs: number;
+  private readonly batchSize: number;
+  private readonly onError?: (error: unknown) => void | Promise<void>;
+  private timer?: ReturnType<typeof setInterval>;
+  private inFlight?: Promise<number>;
+
+  constructor(
+    outbox: RouteEventOutbox,
+    publisher: RouteEventPublisher,
+    options: PostgresOutboxWorkerOptions = {}
+  ) {
+    this.outbox = outbox;
+    this.publisher = publisher;
+    this.intervalMs = options.intervalMs ?? 5_000;
+    this.batchSize = options.batchSize ?? 100;
+    this.onError = options.onError;
+
+    if (!Number.isFinite(this.intervalMs) || this.intervalMs <= 0) {
+      throw new TenantRouterError(
+        "INVALID_OUTBOX_INTERVAL",
+        "Postgres outbox intervalMs must be positive."
+      );
+    }
+
+    if (!Number.isInteger(this.batchSize) || this.batchSize <= 0) {
+      throw new TenantRouterError(
+        "INVALID_OUTBOX_BATCH_SIZE",
+        "Postgres outbox batchSize must be a positive integer."
+      );
+    }
+  }
+
+  start(): void {
+    if (this.timer) {
+      return;
+    }
+
+    void this.runOnce().catch((error) => this.reportError(error));
+    this.timer = setInterval(() => {
+      void this.runOnce().catch((error) => this.reportError(error));
+    }, this.intervalMs);
+  }
+
+  async runOnce(): Promise<number> {
+    if (this.inFlight) {
+      return this.inFlight;
+    }
+
+    const task = this.outbox.publishPendingRouteEvents(
+      this.publisher,
+      this.batchSize
+    );
+    this.inFlight = Promise.resolve(task);
+
+    try {
+      return await this.inFlight;
+    } finally {
+      this.inFlight = undefined;
+    }
+  }
+
+  async stop(): Promise<void> {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+
+    if (this.inFlight) {
+      await this.inFlight;
+    }
+  }
+
+  private async reportError(error: unknown): Promise<void> {
+    if (this.onError) {
+      await this.onError(error);
+    }
+  }
+}
+
 function mapRoute(row: RouteRow): TenantRoute {
   return {
     tenantId: row.tenant_id,
@@ -334,4 +435,15 @@ function toDate(value: Date | string | number | undefined): Date {
   }
 
   return date;
+}
+
+function normalizeLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new TenantRouterError(
+      "INVALID_OUTBOX_BATCH_SIZE",
+      "Outbox limit must be a positive integer."
+    );
+  }
+
+  return limit;
 }

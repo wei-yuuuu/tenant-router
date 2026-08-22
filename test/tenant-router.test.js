@@ -14,7 +14,10 @@ import {
   matchTenant
 } from "../src/index.ts";
 import { createSqliteRouteCache } from "../src/node.ts";
-import { createPostgresRouteStore } from "../src/postgres.ts";
+import {
+  createPostgresOutboxWorker,
+  createPostgresRouteStore
+} from "../src/postgres.ts";
 import { createRedisRouteEvents } from "../src/redis.ts";
 
 const tests = [];
@@ -461,6 +464,50 @@ test("writes a PostgreSQL route and outbox event in one transaction", async () =
   assert.ok(queries[1].text.includes("tenant_router_routes"));
   assert.ok(queries[2].text.includes("tenant_router_route_events"));
   assert.equal(queries[3].text, "COMMIT");
+});
+
+test("outbox worker publishes batches and stops its timer", async () => {
+  const published = [];
+  const calls = [];
+  let remaining = [
+    {
+      eventId: "acme:2:tenant.moved",
+      type: "tenant.moved",
+      tenantId: "acme",
+      shardId: "shard-a",
+      routeVersion: 2
+    }
+  ];
+  const publisher = {
+    async publish(event) {
+      published.push(event);
+    }
+  };
+  const outbox = {
+    async publishPendingRouteEvents(currentPublisher, limit) {
+      calls.push(limit);
+      const batch = remaining.splice(0, limit);
+      for (const event of batch) {
+        await currentPublisher.publish(event);
+      }
+      return batch.length;
+    }
+  };
+  const worker = createPostgresOutboxWorker(outbox, publisher, {
+    intervalMs: 10,
+    batchSize: 2
+  });
+
+  worker.start();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await worker.stop();
+
+  const callCountAfterStop = calls.length;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.ok(callCountAfterStop >= 1);
+  assert.equal(calls.length, callCountAfterStop);
+  assert.equal(published.length, 1);
+  assert.equal(calls[0], 2);
 });
 
 test("publishes and consumes route events through a Redis stream", async () => {

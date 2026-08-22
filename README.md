@@ -18,8 +18,9 @@ See [the database schema reference](docs/database.md) for every persisted SQLite
 flowchart TB
   subgraph ControlPlane["Control plane"]
     direction RL
-    Operator["TenantRouteCommands (operator)"] -->|"[1] create tenant / move tenant / provision shard"| Store["PostgreSQL RouteStore"]
-    Operator -->|"[2] publish RouteEvent"| Redis["Redis route events"]
+    Operator["TenantRouteCommands (operator)"] -->|"[1] create tenant / move tenant / provision shard"| Store["PostgresRouteStore (RouteStore + outbox)"]
+    Store -->|"pending outbox events"| Worker["PostgresOutboxWorker"]
+    Worker -->|"[2] publish RouteEvent"| Redis["Redis route events"]
     Redis -->|"consume event"| Broker["RouteEventBus (broker)"]
   end
 
@@ -141,7 +142,7 @@ await commands.moveTenantToShard({
 });
 ```
 
-Commands also provide `assignTenantToShard`, `changeTenantTier`, and `disableTenant`. The PostgreSQL adapter will use a transaction/outbox so the route write and eventual Redis event publication remain recoverable.
+Commands also provide `assignTenantToShard`, `changeTenantTier`, and `disableTenant`. The PostgreSQL adapter uses a transaction/outbox so the route write and eventual Redis event publication remain recoverable.
 
 Official adapters should implement the core interfaces:
 
@@ -150,10 +151,19 @@ Official adapters should implement the core interfaces:
 - `redisRouteEvents(...)` implements `RouteEventBus` through Redis Streams and is available from `tenant-router/redis`.
 
 ```ts
-import { createPostgresRouteStore } from "tenant-router/postgres";
+import {
+  createPostgresOutboxWorker,
+  createPostgresRouteStore
+} from "tenant-router/postgres";
+import { createTenantRouteCommands } from "tenant-router";
+import { createRedisRouteEvents } from "tenant-router/redis";
 
 const routeStore = createPostgresRouteStore({
   connectionString: process.env.ROUTING_DATABASE_URL
+});
+const events = createRedisRouteEvents({
+  url: process.env.REDIS_URL,
+  streamKey: "tenant-router:route-events"
 });
 
 const commands = createTenantRouteCommands({
@@ -167,15 +177,20 @@ Apply [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) bef
 
 The Redis adapter writes each event to a stream and gives every API process its own cursor, so every router receives every route change.
 
-When PostgreSQL is used as the registry, route changes are also written to its outbox in the same transaction. `routeStore.publishPendingRouteEvents(events)` retries events whose Redis publish did not complete.
+When PostgreSQL is used as the registry, route changes are also written to its outbox in the same transaction. Use the worker to retry events whose Redis publish did not complete:
 
 ```ts
-import { createRedisRouteEvents } from "tenant-router/redis";
-
-const events = createRedisRouteEvents({
-  url: process.env.REDIS_URL,
-  streamKey: "tenant-router:route-events"
+const outboxWorker = createPostgresOutboxWorker(routeStore, events, {
+  intervalMs: 5_000,
+  batchSize: 100,
+  onError: (error) => console.error("route outbox publish failed", error)
 });
+outboxWorker.start();
+
+// During graceful shutdown:
+await outboxWorker.stop();
+await events.close();
+await routeStore.close();
 ```
 
 ## SQLite Cache

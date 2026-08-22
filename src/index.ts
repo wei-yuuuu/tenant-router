@@ -68,6 +68,14 @@ export interface RouteEventPublisher<TRoute extends TenantRoute = TenantRoute> {
   publish(event: RouteEvent<TRoute>): Promise<void> | void;
 }
 
+export interface RouteEventOutbox {
+  listPendingRouteEvents?(limit?: number): Promise<RouteEvent[]> | RouteEvent[];
+  publishPendingRouteEvents(
+    publisher: RouteEventPublisher,
+    limit?: number
+  ): Promise<number> | number;
+}
+
 export interface TenantRouteRegistry<TRoute extends TenantRoute = TenantRoute>
   extends RouteStore<TRoute>
 {
@@ -80,7 +88,6 @@ export interface AtomicTenantRouteRegistry<
 > extends TenantRouteRegistry<TRoute> {
   persistRouteChange(route: TRoute, event: RouteEvent<TRoute>): Promise<void> | void;
   markRouteEventPublished?(eventId: string): Promise<void> | void;
-  listPendingRouteEvents?(): Promise<RouteEvent[]> | RouteEvent[];
 }
 
 export interface ShardRegistry {
