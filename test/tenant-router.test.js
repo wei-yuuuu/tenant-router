@@ -796,6 +796,72 @@ test("publishes and consumes route events through a Redis stream", async () => {
   await events.close();
 });
 
+test("continues consuming Redis events when a handler fails", async () => {
+  const messages = [];
+  let nextMessageId = 1;
+  const client = {
+    isOpen: true,
+    async connect() {},
+    duplicate() {
+      return this;
+    },
+    async xAdd(streamKey, id, fields) {
+      const message = {
+        id: `${nextMessageId++}-0`,
+        message: fields,
+        streamKey,
+        requestedId: id
+      };
+      messages.push(message);
+      return message.id;
+    },
+    async xRead() {
+      if (messages.length > 0) {
+        const message = messages.shift();
+        return [{ name: message.streamKey, messages: [message] }];
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return null;
+    },
+    async quit() {}
+  };
+  const errors = [];
+  const received = [];
+  const events = createRedisRouteEvents({
+    client,
+    blockMs: 10,
+    onError(error) {
+      errors.push(error);
+    }
+  });
+
+  await events.subscribe(async (event) => {
+    if (event.routeVersion === 1) {
+      throw new Error("handler failed");
+    }
+    received.push(event.routeVersion);
+  });
+
+  await events.publish({
+    type: "tenant.moved",
+    tenantId: "acme",
+    shardId: "shard-a",
+    routeVersion: 1
+  });
+  await events.publish({
+    type: "tenant.moved",
+    tenantId: "acme",
+    shardId: "shard-b",
+    routeVersion: 2
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(errors.length, 1);
+  assert.deepEqual(received, [2]);
+  await events.close();
+});
+
 let failed = 0;
 
 for (const { name, fn } of tests) {

@@ -17,6 +17,7 @@ export interface RedisRouteEventsOptions {
   startId?: string;
   blockMs?: number;
   readCount?: number;
+  onError?: (error: unknown) => void | Promise<void>;
 }
 
 export function createRedisRouteEvents(
@@ -32,6 +33,7 @@ export class RedisRouteEvents implements RouteEventBus {
   private readonly streamKey: string;
   private readonly blockMs: number;
   private readonly readCount: number;
+  private readonly onError?: (error: unknown) => void | Promise<void>;
   private nextId: string;
   private readonly handlers = new Set<RouteEventHandler>();
   private subscriberReady?: Promise<void>;
@@ -60,6 +62,7 @@ export class RedisRouteEvents implements RouteEventBus {
     this.nextId = options.startId ?? "0-0";
     this.blockMs = options.blockMs ?? 5_000;
     this.readCount = options.readCount ?? 100;
+    this.onError = options.onError;
 
     if (!Number.isFinite(this.blockMs) || this.blockMs <= 0) {
       throw new Error("Redis route events blockMs must be positive.");
@@ -130,7 +133,11 @@ export class RedisRouteEvents implements RouteEventBus {
       for (const stream of result) {
         for (const message of stream.messages) {
           this.nextId = message.id;
-          await this.dispatch(message.message.event);
+          try {
+            await this.dispatch(message.message.event);
+          } catch (error) {
+            await this.reportError(error);
+          }
         }
       }
     }
@@ -142,7 +149,26 @@ export class RedisRouteEvents implements RouteEventBus {
       return;
     }
 
-    await Promise.all([...this.handlers].map((handler) => handler(event)));
+    const results = await Promise.allSettled(
+      [...this.handlers].map((handler) => handler(event))
+    );
+    for (const result of results) {
+      if (result.status === "rejected") {
+        await this.reportError(result.reason);
+      }
+    }
+  }
+
+  private async reportError(error: unknown): Promise<void> {
+    if (!this.onError) {
+      return;
+    }
+
+    try {
+      await this.onError(error);
+    } catch {
+      // Error reporting must not stop the stream consumer.
+    }
   }
 
   private async ensureConnected(client: RedisClient): Promise<void> {

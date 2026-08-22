@@ -204,7 +204,7 @@ const commands = createTenantRouteCommands({
 
 Apply [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) before using the PostgreSQL adapter.
 
-The Redis adapter writes each event to a stream and gives every API process its own cursor, so every router receives every route change.
+The Redis adapter writes each event to a stream and gives every API process its own cursor, so every router receives every route change. If a subscribed handler fails, the adapter calls the optional `onError` callback and continues consuming later events.
 
 When PostgreSQL is used as the registry, tenant route changes and shard provisioning are also written to its outbox in the same transaction. Use the worker to retry events whose Redis publish did not complete:
 
