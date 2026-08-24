@@ -25,7 +25,10 @@ Start everything with:
 ```sh
 docker compose up -d
 docker compose ps
+npm run smoke:local
 ```
+
+`smoke:local` requires the Compose stack to be healthy. It creates a temporary tenant, verifies PostgreSQL persistence, Redis event propagation into the SQLite cache, and topology queries, then removes the tenant route.
 
 Local connection settings:
 

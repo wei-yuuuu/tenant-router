@@ -25,6 +25,7 @@
   },
   "scripts": {
     "test": "node test/tenant-router.test.js",
+    "smoke:local": "node scripts/local-smoke.ts",
     "check": "node --check src/index.ts && node --check src/node.ts && node --check src/postgres.ts && node --check src/redis.ts",
     "typecheck": "tsc --noEmit"
   },
