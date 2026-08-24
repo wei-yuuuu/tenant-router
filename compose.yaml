@@ -1,4 +1,24 @@
 services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ROUTING_DATABASE_URL: postgres://tenant_router:tenant_router_local@routing-postgres:5432/tenant_router
+      REDIS_URL: redis://redis:6379
+      REDIS_STREAM_KEY: tenant-router:route-events
+      SHARD_1_DATABASE_URL: postgres://shard:shard_local@shard-1:5432/shard_1
+      SHARD_2_DATABASE_URL: postgres://shard:shard_local@shard-2:5432/shard_2
+      SHARD_3_DATABASE_URL: postgres://shard:shard_local@shard-3:5432/shard_3
+      SHARD_4_DATABASE_URL: postgres://shard:shard_local@shard-4:5432/shard_4
+    ports:
+      - "3000"
+    depends_on:
+      routing-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   routing-postgres:
     image: postgres:16-alpine
     environment:

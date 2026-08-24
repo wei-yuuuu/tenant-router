@@ -16,6 +16,7 @@ See [the database schema reference](docs/database.md) for every persisted SQLite
 
 The repository includes a Docker Compose stack for the first-class local dependencies:
 
+- One local API runner, which can be scaled to multiple API instances
 - PostgreSQL metadata store with the route and outbox tables
 - Redis Streams
 - Four PostgreSQL shard databases
@@ -26,6 +27,22 @@ Start everything with:
 docker compose up -d
 docker compose ps
 npm run smoke:local
+```
+
+The API runner publishes container port `3000` to a random host port. Find it with `docker compose port api 3000`, then query it:
+
+```sh
+curl "http://$(docker compose port api 3000)/health"
+curl "http://$(docker compose port api 3000)/route/acme"
+```
+
+To simulate three API pods, scale the same runner. Each container gets its own SQLite cache, Redis stream cursor, and shard client pools:
+
+```sh
+docker compose up -d --scale api=3
+docker compose port --index 1 api 3000
+docker compose port --index 2 api 3000
+docker compose port --index 3 api 3000
 ```
 
 `smoke:local` requires the Compose stack to be healthy. It creates a temporary tenant, verifies PostgreSQL persistence, Redis event propagation into the SQLite cache, and topology queries, then removes the tenant route.
@@ -41,7 +58,81 @@ SHARD_3_DATABASE_URL=postgres://shard:shard_local@localhost:5543/shard_3
 SHARD_4_DATABASE_URL=postgres://shard:shard_local@localhost:5544/shard_4
 ```
 
-The metadata database runs [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) and seeds four local shard definitions on first initialization. To reset all local data, use `docker compose down -v`. This stack starts infrastructure only; the package remains framework-neutral and does not include an application server or demo.
+The metadata database runs [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) and seeds four local shard definitions on first initialization. To reset all local data, use `docker compose down -v`. The API runner is a local verification process, not a framework adapter or demo; the package remains framework-neutral and does not require this HTTP process in production.
+
+## Inspect Local Services
+
+The local stack can be inspected with standard Docker Compose commands. These commands work with any Docker-compatible environment.
+
+### Inspect API Instances
+
+View all service instances and their status:
+
+```sh
+docker compose ps
+docker compose top api
+```
+
+View API startup and runtime logs:
+
+```sh
+docker compose logs --tail=100 api
+docker compose logs -f api
+```
+
+Open a shell in a specific API instance:
+
+```sh
+docker compose exec --index 1 api sh
+```
+
+Inspect the application files and each instance's local SQLite cache from inside the container:
+
+```sh
+find /app -maxdepth 3 -type f | sort
+find /tmp/tenant-router -ls
+env | sort
+```
+
+The API runner exposes `/health`, `/topology`, and `/route/:tenantId`. Its container port is `3000`, published to a random host port so multiple API instances can run together:
+
+```sh
+docker compose port --index 1 api 3000
+# Example output: 0.0.0.0:32768
+curl http://localhost:32768/health
+curl http://localhost:32768/topology
+curl http://localhost:32768/route/acme
+```
+
+`/route/:tenantId` returns `404` when the tenant has no route. A successful response includes the API instance id, cache source, route version, resolved shard, and whether an application-owned shard client is available.
+
+### Inspect PostgreSQL
+
+Inspect routing metadata:
+
+```sh
+docker compose exec routing-postgres psql -U tenant_router -d tenant_router -c "
+  SELECT tenant_id, shard_id, route_version, status
+  FROM tenant_router_routes
+  ORDER BY updated_at DESC;
+"
+```
+
+Inspect connections on a shard:
+
+```sh
+docker compose exec shard-1 psql -U shard -d shard_1 -c "
+  SELECT pid, usename, state, application_name
+  FROM pg_stat_activity;
+"
+```
+
+### Inspect Redis
+
+```sh
+docker compose exec redis redis-cli PING
+docker compose exec redis redis-cli XRANGE tenant-router:route-events - + COUNT 20
+```
 
 ## Architecture
 
@@ -79,7 +170,8 @@ flowchart TB
   Store -. "route and shard metadata" .-> Shard2
   Store -. "route and shard metadata" .-> Shard3
   Store -. "route and shard metadata" .-> Shard4
-  API -->|"query selected shard (example)"| Shard2
+  API -->|"resolve shard client"| ClientResolver["TenantShardClientResolver"]
+  ClientResolver -->|"query selected shard (example)"| Shard2
 
   Legend["Solid arrow: runtime data flow<br/>Dashed arrow: stored metadata relationship"]
 ```
@@ -151,6 +243,33 @@ Route versions are monotonic per tenant. An API process serializes event handlin
 - `router.explain(tenantId)` reports whether the route came from cache or store.
 - `router.invalidate(tenantId)` manually clears one cached route.
 - `router.close()` unsubscribes from route events.
+
+`TenantShardRouter` only resolves routing metadata. Use `TenantShardClientResolver` to bind that result to an application-owned shard pool or client:
+
+```ts
+import {
+  createTenantShardClientResolver,
+  createTenantRouter
+} from "tenant-router";
+
+const shardClients = new Map([
+  ["shard-a", { name: "postgres pool for shard-a" }],
+  ["shard-b", { name: "postgres pool for shard-b" }]
+]);
+const tenantClientResolver = createTenantShardClientResolver({
+  routeResolver: router,
+  shardClients: {
+    getShardClient(shardId) {
+      return shardClients.get(shardId) ?? null;
+    }
+  }
+});
+
+const { route, client } = await tenantClientResolver.resolve("acme");
+// client is the application-owned client for route.shardId.
+```
+
+The library resolves route metadata and looks up an application-owned shard client. It does not create business-data pools, choose their pool sizes, or execute tenant SQL. The API service owns pool creation, reuse, and shutdown, so the router remains framework-neutral and can work with `pg.Pool`, another database client, or a test double.
 
 Route warmup is optional. It is useful for memory caches during startup; the SQLite cache already persists entries across process restarts.
 

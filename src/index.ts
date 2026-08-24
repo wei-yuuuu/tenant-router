@@ -154,6 +154,36 @@ export interface ResolveRouteOptions {
   bypassCache?: boolean;
 }
 
+export interface TenantRouteResolver<TRoute extends TenantRoute = TenantRoute> {
+  resolve(tenantId: string, options?: ResolveRouteOptions): Promise<TRoute>;
+}
+
+export interface ShardClientRegistry<TClient = unknown> {
+  getShardClient(
+    shardId: string
+  ):
+    | TClient
+    | null
+    | undefined
+    | Promise<TClient | null | undefined>;
+}
+
+export interface ResolvedTenantShardClient<
+  TRoute extends TenantRoute = TenantRoute,
+  TClient = unknown
+> {
+  route: TRoute;
+  client: TClient;
+}
+
+export interface TenantShardClientResolverConfig<
+  TRoute extends TenantRoute = TenantRoute,
+  TClient = unknown
+> {
+  routeResolver: TenantRouteResolver<TRoute>;
+  shardClients: ShardClientRegistry<TClient>;
+}
+
 export interface ExplainRouteResult<TRoute extends TenantRoute = TenantRoute> {
   tenantId: string;
   route: TRoute | null;
@@ -207,10 +237,31 @@ export class TenantRouteNotFoundError extends Error {
   }
 }
 
+export class TenantShardClientNotFoundError extends Error {
+  tenantId: string;
+  shardId: string;
+
+  constructor(tenantId: string, shardId: string) {
+    super(`No shard client found for tenant "${tenantId}" on "${shardId}".`);
+    this.name = "TenantShardClientNotFoundError";
+    this.tenantId = tenantId;
+    this.shardId = shardId;
+  }
+}
+
 export function createTenantRouter<
   TRoute extends TenantRoute = TenantRoute
 >(config: TenantShardRouterConfig<TRoute>): TenantShardRouter<TRoute> {
   return new TenantShardRouter(config);
+}
+
+export function createTenantShardClientResolver<
+  TRoute extends TenantRoute = TenantRoute,
+  TClient = unknown
+>(
+  config: TenantShardClientResolverConfig<TRoute, TClient>
+): TenantShardClientResolver<TRoute, TClient> {
+  return new TenantShardClientResolver(config);
 }
 
 export function createTenantRouteCommands(
@@ -330,7 +381,9 @@ export class RouteTopologyReader<TRoute extends TenantRoute = TenantRoute>
   }
 }
 
-export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
+export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute>
+  implements TenantRouteResolver<TRoute>
+{
   private readonly routeStore: RouteStore<TRoute>;
   private readonly cache: RouteCache<TRoute>;
   private readonly events?: RouteEventBus<TRoute>;
@@ -558,6 +611,47 @@ export class TenantShardRouter<TRoute extends TenantRoute = TenantRoute> {
     ) {
       this.latestRouteVersions.set(route.tenantId, route.routeVersion);
     }
+  }
+}
+
+export class TenantShardClientResolver<
+  TRoute extends TenantRoute = TenantRoute,
+  TClient = unknown
+> {
+  private readonly routeResolver: TenantRouteResolver<TRoute>;
+  private readonly shardClients: ShardClientRegistry<TClient>;
+
+  constructor(config: TenantShardClientResolverConfig<TRoute, TClient>) {
+    if (!config || typeof config !== "object") {
+      throw new TenantRouterError(
+        "INVALID_SHARD_CLIENT_CONFIG",
+        "Tenant shard client resolver config must be an object."
+      );
+    }
+
+    if (!config.routeResolver || !config.shardClients) {
+      throw new TenantRouterError(
+        "INVALID_SHARD_CLIENT_CONFIG",
+        "Tenant shard client resolver requires routeResolver and shardClients."
+      );
+    }
+
+    this.routeResolver = config.routeResolver;
+    this.shardClients = config.shardClients;
+  }
+
+  async resolve(
+    tenantId: string,
+    options: ResolveRouteOptions = {}
+  ): Promise<ResolvedTenantShardClient<TRoute, TClient>> {
+    const route = await this.routeResolver.resolve(tenantId, options);
+    const client = await this.shardClients.getShardClient(route.shardId);
+
+    if (client === null || client === undefined) {
+      throw new TenantShardClientNotFoundError(route.tenantId, route.shardId);
+    }
+
+    return { route, client };
   }
 }
 

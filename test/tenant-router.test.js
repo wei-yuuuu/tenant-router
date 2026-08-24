@@ -4,10 +4,12 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import {
+  TenantShardClientNotFoundError,
   TenantRouteNotFoundError,
   TenantRouterError,
   createRouteTopologyReader,
   createTenantRouteCommands,
+  createTenantShardClientResolver,
   createMemoryRouteEvents,
   createMemoryRouteStore,
   createTenantMatcher,
@@ -184,6 +186,51 @@ test("resolves tenant ids to shard routes from the route store", async () => {
   assert.equal(route.tenantId, "acme");
   assert.equal(route.shardId, "shard-a");
   assert.equal(route.routeVersion, 1);
+});
+
+test("resolves a tenant route to an application-owned shard client", async () => {
+  const routeStore = createMemoryRouteStore({
+    routes: [{ tenantId: "acme", shardId: "shard-a", routeVersion: 1 }]
+  });
+  const router = createTenantRouter({ routeStore });
+  const shardAClient = { name: "shard-a-client" };
+  const resolver = createTenantShardClientResolver({
+    routeResolver: router,
+    shardClients: {
+      getShardClient(shardId) {
+        return shardId === "shard-a" ? shardAClient : null;
+      }
+    }
+  });
+
+  const resolved = await resolver.resolve("acme");
+
+  assert.equal(resolved.route.shardId, "shard-a");
+  assert.equal(resolved.client, shardAClient);
+});
+
+test("reports when a resolved shard has no client", async () => {
+  const router = createTenantRouter({
+    routeStore: createMemoryRouteStore({
+      routes: [{ tenantId: "acme", shardId: "shard-a", routeVersion: 1 }]
+    })
+  });
+  const resolver = createTenantShardClientResolver({
+    routeResolver: router,
+    shardClients: {
+      getShardClient() {
+        return null;
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => resolver.resolve("acme"),
+    (error) =>
+      error instanceof TenantShardClientNotFoundError &&
+      error.tenantId === "acme" &&
+      error.shardId === "shard-a"
+  );
 });
 
 test("explains cache hits after the first route store lookup", async () => {
