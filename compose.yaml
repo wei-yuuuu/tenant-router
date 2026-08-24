@@ -1,0 +1,102 @@
+services:
+  routing-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tenant_router
+      POSTGRES_USER: tenant_router
+      POSTGRES_PASSWORD: tenant_router_local
+    ports:
+      - "5432:5432"
+    volumes:
+      - routing-postgres-data:/var/lib/postgresql/data
+      - ./migrations/001_tenant_router.sql:/docker-entrypoint-initdb.d/001_tenant_router.sql:ro
+      - ./docker/local/002_seed_shards.sql:/docker-entrypoint-initdb.d/002_seed_shards.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tenant_router -d tenant_router"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  shard-1:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shard_1
+      POSTGRES_USER: shard
+      POSTGRES_PASSWORD: shard_local
+    ports:
+      - "5541:5432"
+    volumes:
+      - shard-1-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shard -d shard_1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  shard-2:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shard_2
+      POSTGRES_USER: shard
+      POSTGRES_PASSWORD: shard_local
+    ports:
+      - "5542:5432"
+    volumes:
+      - shard-2-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shard -d shard_2"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  shard-3:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shard_3
+      POSTGRES_USER: shard
+      POSTGRES_PASSWORD: shard_local
+    ports:
+      - "5543:5432"
+    volumes:
+      - shard-3-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shard -d shard_3"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  shard-4:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shard_4
+      POSTGRES_USER: shard
+      POSTGRES_PASSWORD: shard_local
+    ports:
+      - "5544:5432"
+    volumes:
+      - shard-4-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shard -d shard_4"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  routing-postgres-data:
+  redis-data:
+  shard-1-data:
+  shard-2-data:
+  shard-3-data:
+  shard-4-data:

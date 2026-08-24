@@ -12,6 +12,34 @@ The supported production shape is SQLite for the local cache, Redis for route ev
 
 See [the database schema reference](docs/database.md) for every persisted SQLite cache field and ready-to-run inspection queries.
 
+## Local Stack
+
+The repository includes a Docker Compose stack for the first-class local dependencies:
+
+- PostgreSQL metadata store with the route and outbox tables
+- Redis Streams
+- Four PostgreSQL shard databases
+
+Start everything with:
+
+```sh
+docker compose up -d
+docker compose ps
+```
+
+Local connection settings:
+
+```sh
+ROUTING_DATABASE_URL=postgres://tenant_router:tenant_router_local@localhost:5432/tenant_router
+REDIS_URL=redis://localhost:6379
+SHARD_1_DATABASE_URL=postgres://shard:shard_local@localhost:5541/shard_1
+SHARD_2_DATABASE_URL=postgres://shard:shard_local@localhost:5542/shard_2
+SHARD_3_DATABASE_URL=postgres://shard:shard_local@localhost:5543/shard_3
+SHARD_4_DATABASE_URL=postgres://shard:shard_local@localhost:5544/shard_4
+```
+
+The metadata database runs [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) and seeds four local shard definitions on first initialization. To reset all local data, use `docker compose down -v`. This stack starts infrastructure only; the package remains framework-neutral and does not include an application server or demo.
+
 ## Architecture
 
 ```mermaid
