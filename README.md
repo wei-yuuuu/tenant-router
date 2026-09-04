@@ -56,6 +56,14 @@ SHARD_1_DATABASE_URL=postgres://shard:shard_local@localhost:5541/shard_1
 SHARD_2_DATABASE_URL=postgres://shard:shard_local@localhost:5542/shard_2
 SHARD_3_DATABASE_URL=postgres://shard:shard_local@localhost:5543/shard_3
 SHARD_4_DATABASE_URL=postgres://shard:shard_local@localhost:5544/shard_4
+ROUTING_POOL_MAX=10
+SHARD_POOL_MAX=10
+```
+
+`SHARD_POOL_MAX` is the maximum number of PostgreSQL connections per API instance, per shard. With three API instances and `SHARD_POOL_MAX=10`, each shard can receive up to `3 x 10 = 30` client connections. Pool connections are created lazily, so this is a ceiling rather than an allocation at startup. Override it when starting the local stack:
+
+```sh
+SHARD_POOL_MAX=5 docker compose up -d --build --scale api=3
 ```
 
 The metadata database runs [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) and seeds four local shard definitions on first initialization. To reset all local data, use `docker compose down -v`. The API runner is a local verification process, not a framework adapter or demo; the package remains framework-neutral and does not require this HTTP process in production.
@@ -122,10 +130,12 @@ Inspect connections on a shard:
 
 ```sh
 docker compose exec shard-1 psql -U shard -d shard_1 -c "
-  SELECT pid, usename, state, application_name
-  FROM pg_stat_activity;
+      SELECT pid, usename, state, application_name
+      FROM pg_stat_activity;
 "
 ```
+
+The API pool settings are also included in `/health` as `routingPoolMax`, `shardPoolMax`, and `shardCount`.
 
 ### Inspect Redis
 

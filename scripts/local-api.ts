@@ -18,6 +18,8 @@ import { createRedisRouteEvents } from "../src/redis.ts";
 
 const port = readPort(process.env.PORT ?? "3000");
 const instanceId = process.env.API_INSTANCE_ID ?? hostname();
+const routingPoolMax = readPoolMax(process.env.ROUTING_POOL_MAX ?? "10");
+const shardPoolMax = readPoolMax(process.env.SHARD_POOL_MAX ?? "10");
 const routingDatabaseUrl =
   process.env.ROUTING_DATABASE_URL ??
   "postgres://tenant_router:tenant_router_local@routing-postgres:5432/tenant_router";
@@ -30,7 +32,8 @@ mkdirSync(dirname(sqlitePath), { recursive: true });
 
 const cache = createSqliteRouteCache({ path: sqlitePath });
 const routeStore = createPostgresRouteStore({
-  connectionString: routingDatabaseUrl
+  connectionString: routingDatabaseUrl,
+  poolConfig: { max: routingPoolMax }
 });
 const events = createRedisRouteEvents({
   url: redisUrl,
@@ -44,7 +47,7 @@ const topology = createRouteTopologyReader({
   routeStore,
   shardRegistry: routeStore
 });
-const shardPools = createShardPools();
+const shardPools = createShardPools(shardPoolMax);
 const tenantClientResolver = createTenantShardClientResolver({
   routeResolver: router,
   shardClients: {
@@ -69,7 +72,10 @@ const server = createServer(async (request, response) => {
         instanceId,
         pid: process.pid,
         cache: "sqlite",
-        streamKey
+        streamKey,
+        routingPoolMax,
+        shardPoolMax,
+        shardCount: shardPools.size
       });
       return;
     }
@@ -136,7 +142,9 @@ console.log(
     instanceId,
     port,
     sqlitePath,
-    streamKey
+    streamKey,
+    routingPoolMax,
+    shardPoolMax
   })
 );
 
@@ -164,7 +172,7 @@ process.once("SIGTERM", () => {
   void close().then(() => process.exit(0));
 });
 
-function createShardPools(): Map<string, Pool> {
+function createShardPools(poolMax: number): Map<string, Pool> {
   const pools = new Map<string, Pool>();
   const defaultPorts = new Map([
     ["shard-1", 5541],
@@ -178,7 +186,7 @@ function createShardPools(): Map<string, Pool> {
     const databaseUrl =
       process.env[environmentKey] ??
       `postgres://shard:shard_local@localhost:${port}/${shardId.replace("-", "_")}`;
-    pools.set(shardId, new Pool({ connectionString: databaseUrl }));
+    pools.set(shardId, new Pool({ connectionString: databaseUrl, max: poolMax }));
   }
   return pools;
 }
@@ -187,6 +195,14 @@ function readPort(value: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65_535) {
     throw new Error(`Invalid PORT: ${value}`);
+  }
+  return parsed;
+}
+
+function readPoolMax(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid pool max: ${value}`);
   }
   return parsed;
 }

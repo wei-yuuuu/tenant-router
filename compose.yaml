@@ -5,8 +5,10 @@ services:
       dockerfile: Dockerfile
     environment:
       ROUTING_DATABASE_URL: postgres://tenant_router:tenant_router_local@routing-postgres:5432/tenant_router
+      ROUTING_POOL_MAX: ${ROUTING_POOL_MAX:-10}
       REDIS_URL: redis://redis:6379
       REDIS_STREAM_KEY: tenant-router:route-events
+      SHARD_POOL_MAX: ${SHARD_POOL_MAX:-10}
       SHARD_1_DATABASE_URL: postgres://shard:shard_local@shard-1:5432/shard_1
       SHARD_2_DATABASE_URL: postgres://shard:shard_local@shard-2:5432/shard_2
       SHARD_3_DATABASE_URL: postgres://shard:shard_local@shard-3:5432/shard_3
