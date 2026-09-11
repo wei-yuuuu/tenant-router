@@ -118,7 +118,7 @@ curl http://localhost:32768/route/acme
 
 ### Use the React Control Panel
 
-Open `http://localhost:5173/`. The panel is a separate Compose service built from `apps/control-panel`, with React Flow rendering the command and data paths. It reads `/health` and `/topology` through its same-origin `/api` proxy and sends commands to the API service. It can create a tenant route, move a tenant, change its tier, disable it, and register shard metadata.
+Open `http://localhost:5173/`. The panel is a separate Compose service from `apps/control-panel` (bind-mounted for Vite HMR; edit `apps/control-panel/src` and refresh happens automatically), with React Flow rendering the command and data paths. It reads `/health` and `/topology` through its same-origin `/api` proxy and sends commands to the API service. It can create a tenant route, move a tenant, change its tier, disable it, and register shard metadata.
 
 The command endpoints are intentionally small and map directly to `TenantRouteCommands`:
 
