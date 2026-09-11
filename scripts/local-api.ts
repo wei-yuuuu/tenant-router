@@ -6,11 +6,19 @@ import { dirname } from "node:path";
 import { Pool } from "pg";
 
 import {
+  createTenantRouteCommands,
   TenantRouteNotFoundError,
   TenantShardClientNotFoundError,
+  TenantRouterError,
   createRouteTopologyReader,
   createTenantRouter,
   createTenantShardClientResolver
+} from "../src/index.ts";
+import type {
+  AssignTenantToShardInput,
+  ChangeTenantTierInput,
+  DisableTenantInput,
+  ShardDefinition
 } from "../src/index.ts";
 import { createSqliteRouteCache } from "../src/node.ts";
 import { createPostgresRouteStore } from "../src/postgres.ts";
@@ -46,6 +54,11 @@ const router = createTenantRouter({ routeStore, events, cache });
 const topology = createRouteTopologyReader({
   routeStore,
   shardRegistry: routeStore
+});
+const commands = createTenantRouteCommands({
+  routeRegistry: routeStore,
+  shardRegistry: routeStore,
+  events
 });
 const shardPools = createShardPools(shardPoolMax);
 const tenantClientResolver = createTenantShardClientResolver({
@@ -109,8 +122,64 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && requestUrl.pathname === "/tenants") {
+      const body = await readJsonBody(request);
+      const route = await commands.createTenant(readTenantAssignment(body));
+      writeJson(response, 201, { route, instanceId });
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/shards") {
+      const body = await readJsonBody(request);
+      const shard = await commands.provisionShard(readShardDefinition(body));
+      writeJson(response, 201, { shard, instanceId });
+      return;
+    }
+
+    const commandMatch = /^\/tenants\/([^/]+)\/(move|tier|disable)$/.exec(
+      requestUrl.pathname
+    );
+    if (request.method === "POST" && commandMatch) {
+      const tenantId = decodeURIComponent(commandMatch[1]);
+      const body = await readJsonBody(request);
+
+      if (commandMatch[2] === "move") {
+        const route = await commands.moveTenantToShard({
+          ...readTenantMove(body),
+          tenantId
+        });
+        writeJson(response, 200, { route, instanceId });
+        return;
+      }
+
+      if (commandMatch[2] === "tier") {
+        const route = await commands.changeTenantTier({
+          ...readTenantTierChange(body),
+          tenantId
+        });
+        writeJson(response, 200, { route, instanceId });
+        return;
+      }
+
+      const route = await commands.disableTenant({
+        ...readTenantDisable(body),
+        tenantId
+      });
+      writeJson(response, 200, { route, instanceId });
+      return;
+    }
+
     writeJson(response, 404, { error: "NOT_FOUND", instanceId });
   } catch (error) {
+    if (error instanceof TenantRouterError) {
+      writeJson(response, 400, {
+        error: error.code,
+        message: error.message,
+        instanceId
+      });
+      return;
+    }
+
     if (error instanceof TenantRouteNotFoundError) {
       writeJson(response, 404, {
         error: "TENANT_ROUTE_NOT_FOUND",
@@ -214,6 +283,201 @@ function writeJson(
 ): void {
   response.writeHead(statusCode, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
+}
+
+async function readJsonBody(
+  request: import("node:http").IncomingMessage
+): Promise<Record<string, unknown>> {
+  let body = "";
+  for await (const chunk of request) {
+    body += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    if (body.length > 1_000_000) {
+      throw new TenantRouterError(
+        "REQUEST_BODY_TOO_LARGE",
+        "Request body must be smaller than 1 MB."
+      );
+    }
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body || "{}");
+  } catch {
+    throw new TenantRouterError(
+      "INVALID_JSON",
+      "Request body must contain valid JSON."
+    );
+  }
+
+  if (!isRecord(parsed)) {
+    throw new TenantRouterError(
+      "INVALID_REQUEST",
+      "Request body must be a JSON object."
+    );
+  }
+
+  return parsed;
+}
+
+function readTenantAssignment(
+  body: Record<string, unknown>
+): AssignTenantToShardInput {
+  const input: AssignTenantToShardInput = {
+    tenantId: requiredString(body, "tenantId"),
+    shardId: requiredString(body, "shardId")
+  };
+  const tier = optionalString(body, "tier");
+  const reason = optionalString(body, "reason");
+  const metadata = optionalRecord(body, "metadata");
+
+  if (tier !== undefined) {
+    input.tier = tier;
+  }
+  if (reason !== undefined) {
+    input.reason = reason;
+  }
+  if (metadata !== undefined) {
+    input.metadata = metadata;
+  }
+
+  return input;
+}
+
+function readTenantMove(
+  body: Record<string, unknown>
+): Omit<AssignTenantToShardInput, "tenantId"> {
+  const input: Omit<AssignTenantToShardInput, "tenantId"> = {
+    shardId: requiredString(body, "shardId")
+  };
+  const tier = optionalString(body, "tier");
+  const reason = optionalString(body, "reason");
+  const metadata = optionalRecord(body, "metadata");
+
+  if (tier !== undefined) {
+    input.tier = tier;
+  }
+  if (reason !== undefined) {
+    input.reason = reason;
+  }
+  if (metadata !== undefined) {
+    input.metadata = metadata;
+  }
+
+  return input;
+}
+
+function readTenantTierChange(
+  body: Record<string, unknown>
+): Omit<ChangeTenantTierInput, "tenantId"> {
+  return {
+    tier: requiredString(body, "tier"),
+    reason: optionalString(body, "reason")
+  };
+}
+
+function readTenantDisable(
+  body: Record<string, unknown>
+): Omit<DisableTenantInput, "tenantId"> {
+  return { reason: optionalString(body, "reason") };
+}
+
+function readShardDefinition(
+  body: Record<string, unknown>
+): ShardDefinition {
+  const shard: ShardDefinition = { id: requiredString(body, "id") };
+  const name = optionalString(body, "name");
+  const status = optionalString(body, "status");
+  const region = optionalString(body, "region");
+  const capacity = optionalNumber(body, "capacity");
+  const loadScore = optionalNumber(body, "loadScore");
+  const metadata = optionalRecord(body, "metadata");
+
+  if (name !== undefined) {
+    shard.name = name;
+  }
+  if (status !== undefined) {
+    shard.status = status;
+  }
+  if (region !== undefined) {
+    shard.region = region;
+  }
+  if (capacity !== undefined) {
+    shard.capacity = capacity;
+  }
+  if (loadScore !== undefined) {
+    shard.loadScore = loadScore;
+  }
+  if (metadata !== undefined) {
+    shard.metadata = metadata;
+  }
+
+  return shard;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requiredString(body: Record<string, unknown>, key: string): string {
+  const value = body[key];
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new TenantRouterError(
+      "INVALID_REQUEST",
+      `Request field "${key}" must be a non-empty string.`
+    );
+  }
+  return value;
+}
+
+function optionalString(
+  body: Record<string, unknown>,
+  key: string
+): string | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new TenantRouterError(
+      "INVALID_REQUEST",
+      `Request field "${key}" must be a string.`
+    );
+  }
+  return value;
+}
+
+function optionalNumber(
+  body: Record<string, unknown>,
+  key: string
+): number | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TenantRouterError(
+      "INVALID_REQUEST",
+      `Request field "${key}" must be a finite number.`
+    );
+  }
+  return value;
+}
+
+function optionalRecord(
+  body: Record<string, unknown>,
+  key: string
+): Record<string, unknown> | undefined {
+  const value = body[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new TenantRouterError(
+      "INVALID_REQUEST",
+      `Request field "${key}" must be a JSON object.`
+    );
+  }
+  return value;
 }
 
 async function listen(

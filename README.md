@@ -16,6 +16,7 @@ See [the database schema reference](docs/database.md) for every persisted SQLite
 
 The repository includes a Docker Compose stack for the first-class local dependencies:
 
+- One React + React Flow control panel
 - One local API runner, which can be scaled to multiple API instances
 - PostgreSQL metadata store with the route and outbox tables
 - Redis Streams
@@ -29,9 +30,10 @@ docker compose ps
 npm run smoke:local
 ```
 
-The API runner publishes container port `3000` to a random host port. Find it with `docker compose port api 3000`, then query it:
+Open the control panel at `http://localhost:5173/`. The API runner publishes container port `3000` to a random host port for direct inspection:
 
 ```sh
+open http://localhost:5173/
 curl "http://$(docker compose port api 3000)/health"
 curl "http://$(docker compose port api 3000)/route/acme"
 ```
@@ -66,7 +68,7 @@ SHARD_POOL_MAX=10
 SHARD_POOL_MAX=5 docker compose up -d --build --scale api=3
 ```
 
-The metadata database runs [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) and seeds four local shard definitions on first initialization. To reset all local data, use `docker compose down -v`. The API runner is a local verification process, not a framework adapter or demo; the package remains framework-neutral and does not require this HTTP process in production.
+The metadata database runs [`migrations/001_tenant_router.sql`](migrations/001_tenant_router.sql) and seeds four local shard definitions on first initialization. To reset all local data, use `docker compose down -v`. The API runner and React control panel are local verification and control processes; they are not framework adapters, and the package remains framework-neutral without requiring either process in production.
 
 ## Inspect Local Services
 
@@ -113,6 +115,36 @@ curl http://localhost:32768/route/acme
 ```
 
 `/route/:tenantId` returns `404` when the tenant has no route. A successful response includes the API instance id, cache source, route version, resolved shard, and whether an application-owned shard client is available.
+
+### Use the React Control Panel
+
+Open `http://localhost:5173/`. The panel is a separate Compose service built from `apps/control-panel`, with React Flow rendering the command and data paths. It reads `/health` and `/topology` through its same-origin `/api` proxy and sends commands to the API service. It can create a tenant route, move a tenant, change its tier, disable it, and register shard metadata.
+
+The command endpoints are intentionally small and map directly to `TenantRouteCommands`:
+
+```sh
+curl -X POST http://localhost:32768/tenants \
+  -H 'content-type: application/json' \
+  -d '{"tenantId":"acme","shardId":"shard-1","tier":"pro"}'
+
+curl -X POST http://localhost:32768/tenants/acme/move \
+  -H 'content-type: application/json' \
+  -d '{"shardId":"shard-2","reason":"rebalance"}'
+
+curl -X POST http://localhost:32768/tenants/acme/tier \
+  -H 'content-type: application/json' \
+  -d '{"tier":"enterprise"}'
+
+curl -X POST http://localhost:32768/tenants/acme/disable \
+  -H 'content-type: application/json' \
+  -d '{"reason":"account closed"}'
+
+curl -X POST http://localhost:32768/shards \
+  -H 'content-type: application/json' \
+  -d '{"id":"shard-5","region":"ap-northeast-1","capacity":1000,"loadScore":0.25}'
+```
+
+These endpoints are for local control and verification. The React control panel is intentionally separate from the core package and does not become a runtime dependency of `tenant-router`. Production applications should put their own authentication, authorization, audit policy, and request validation in front of `TenantRouteCommands`.
 
 ### Inspect PostgreSQL
 
@@ -186,7 +218,7 @@ flowchart TB
   Legend["Solid arrow: runtime data flow<br/>Dashed arrow: stored metadata relationship"]
 ```
 
-This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts for its SQLite, Redis, and PostgreSQL adapters.
+The React control panel is a thin client of `TenantRouteCommands`; it is not a separate route store. This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts for its SQLite, Redis, and PostgreSQL adapters.
 
 ## Core Usage
 

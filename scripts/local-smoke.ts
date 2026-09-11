@@ -67,6 +67,7 @@ async function waitFor(
 }
 
 try {
+  const initialShard2Load = await topology.getShardLoad("shard-2");
   await commands.createTenant({
     tenantId,
     shardId: "shard-1",
@@ -88,7 +89,10 @@ try {
 
   assert.equal(route.shardId, "shard-2");
   assert.equal(route.routeVersion, 2);
-  assert.equal(shardLoad?.tenantCount, 1);
+  assert.equal(
+    shardLoad?.tenantCount,
+    (initialShard2Load?.tenantCount ?? 0) + 1
+  );
   assert.equal(
     snapshot.unassignedRoutes.some(
       (candidate) => candidate.tenantId === tenantId
