@@ -46,7 +46,7 @@ export interface DraftTenant {
   tier: string;
 }
 
-export type FlowKind = "api" | "redis" | "shard" | "tenant";
+export type FlowKind = "api" | "redis" | "postgres" | "shard" | "tenant";
 
 /** Serializable React Flow node payload — actions live in PlacementActionsContext. */
 export interface FlowNodeData extends Record<string, unknown> {

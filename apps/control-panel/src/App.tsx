@@ -12,6 +12,7 @@ import {
 } from "react";
 import {
   Background,
+  BaseEdge,
   Controls,
   Handle,
   Position,
@@ -20,6 +21,7 @@ import {
   applyNodeChanges,
   useReactFlow,
   type Edge,
+  type EdgeProps,
   type Node,
   type NodeChange,
   type NodeProps,
@@ -38,6 +40,8 @@ import type {
 
 const pollIntervalMs = 3000;
 const fitViewOptions = { padding: 0.18, minZoom: 0.4, maxZoom: 1, duration: 0 } as const;
+/** Causal write-path highlight: SoT commit → stream notify → local cache. */
+type RoutePulsePhase = "off" | "store" | "redis" | "api";
 const panOnDragButtons: number[] = [1, 2];
 const reactFlowProOptions = { hideAttribution: true } as const;
 const shardWidth = 280;
@@ -207,9 +211,13 @@ function edgesEqual(a: Edge[], b: Edge[]): boolean {
     const right = b[i];
     if (
       left.id !== right.id ||
+      left.type !== right.type ||
       left.source !== right.source ||
       left.target !== right.target ||
+      left.sourceHandle !== right.sourceHandle ||
+      left.targetHandle !== right.targetHandle ||
       left.animated !== right.animated ||
+      left.zIndex !== right.zIndex ||
       JSON.stringify(left.style ?? null) !== JSON.stringify(right.style ?? null)
     ) {
       return false;
@@ -232,6 +240,9 @@ function PlacementMap() {
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<DraftTenant[]>([]);
   const [busy, setBusy] = useState(false);
+  // Write-path pulse: RouteStore → Redis → API cache (see flashRoutePath).
+  const [pulsePhase, setPulsePhase] = useState<RoutePulsePhase>("off");
+  const pulseTimersRef = useRef<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<{ text: string; tone: "idle" | "info" | "error" }>({
@@ -242,7 +253,6 @@ function PlacementMap() {
   const syncedLabelRef = useRef<HTMLSpanElement | null>(null);
   const [canvasReady, setCanvasReady] = useState(false);
 
-  const [redisFlash, setRedisFlash] = useState(false);
   const [nodes, setNodes] = useState<Node<FlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
 
@@ -253,6 +263,7 @@ function PlacementMap() {
   const didFitRef = useRef(false);
   const dragOriginShardRef = useRef<string | null>(null);
   const draggingNodeIdRef = useRef<string | null>(null);
+  const refreshGenRef = useRef(0);
 
   const { fitView, getIntersectingNodes } = useReactFlow<Node<FlowNodeData>, Edge>();
 
@@ -264,9 +275,27 @@ function PlacementMap() {
     draftsRef.current = drafts;
   }, [drafts]);
 
-  const flashRedis = useCallback(() => {
-    setRedisFlash(true);
-    window.setTimeout(() => setRedisFlash(false), 1400);
+  useEffect(() => {
+    return () => {
+      for (const id of pulseTimersRef.current) {
+        window.clearTimeout(id);
+      }
+      pulseTimersRef.current = [];
+    };
+  }, []);
+
+  const flashRoutePath = useCallback(() => {
+    // Real write path: Postgres RouteStore commit → Redis Streams notify → API RouteCache.
+    for (const id of pulseTimersRef.current) {
+      window.clearTimeout(id);
+    }
+    pulseTimersRef.current = [];
+    setPulsePhase("store");
+    pulseTimersRef.current.push(
+      window.setTimeout(() => setPulsePhase("redis"), 420),
+      window.setTimeout(() => setPulsePhase("api"), 840),
+      window.setTimeout(() => setPulsePhase("off"), 1300)
+    );
   }, []);
 
   const postJson = useCallback(async (path: string, body: unknown) => {
@@ -288,11 +317,16 @@ function PlacementMap() {
   }, []);
 
   const refresh = useCallback(async () => {
+    // Latest-wins: overlapping poll + action refresh must not apply stale payloads.
+    const gen = (refreshGenRef.current += 1);
     try {
       const [nextHealth, nextTopology] = await Promise.all([
         fetchHealth(),
         fetchTopology()
       ]);
+      if (gen !== refreshGenRef.current) {
+        return;
+      }
       setHealth((current) => (healthEqual(current, nextHealth) ? current : nextHealth));
       setTopology((current) =>
         topologyEqual(current, nextTopology) ? current : nextTopology
@@ -323,9 +357,14 @@ function PlacementMap() {
         }
       }
     } catch (caughtError) {
+      if (gen !== refreshGenRef.current) {
+        return;
+      }
       setError(errorMessage(caughtError));
     } finally {
-      setLoading(false);
+      if (gen === refreshGenRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -353,7 +392,6 @@ function PlacementMap() {
         return false;
       }
 
-      setBusy(true);
       setError("");
       const fromShardId = current.shardId;
       setStatus({ text: `moving tenant ${tenantId}…`, tone: "info" });
@@ -362,7 +400,7 @@ function PlacementMap() {
           `/tenants/${encodeURIComponent(tenantId)}/move`,
           { shardId, reason: "moved from placement map" }
         );
-        flashRedis();
+        flashRoutePath();
         await refresh();
         const route = readRoute(payload);
         if (route) {
@@ -378,23 +416,20 @@ function PlacementMap() {
         setStatus({ text: "move failed", tone: "error" });
         await refresh();
         return false;
-      } finally {
-        setBusy(false);
       }
     },
-    [flashRedis, postJson, refresh, selectTenant]
+    [flashRoutePath, postJson, refresh, selectTenant]
   );
 
   const applyTier = useCallback(
     async (tenantId: string, tier: string) => {
-      setBusy(true);
       setError("");
       try {
         const payload = await postJson(
           `/tenants/${encodeURIComponent(tenantId)}/tier`,
           { tier, reason: "changed from placement map" }
         );
-        flashRedis();
+        flashRoutePath();
         await refresh();
         const route = readRoute(payload);
         if (route) {
@@ -406,23 +441,20 @@ function PlacementMap() {
       } catch (caughtError) {
         setError(errorMessage(caughtError));
         setStatus({ text: "tier change failed", tone: "error" });
-      } finally {
-        setBusy(false);
       }
     },
-    [flashRedis, postJson, refresh]
+    [flashRoutePath, postJson, refresh]
   );
 
 
   const disableTenant = useCallback(
     async (tenantId: string) => {
-      setBusy(true);
       setError("");
       try {
         await postJson(`/tenants/${encodeURIComponent(tenantId)}/disable`, {
           reason: "removed from placement map"
         });
-        flashRedis();
+        flashRoutePath();
         await refresh();
         setStatus({ text: `remove tenant ${tenantId}`, tone: "info" });
         if (selectedTenantId === tenantId) {
@@ -431,11 +463,9 @@ function PlacementMap() {
       } catch (caughtError) {
         setError(errorMessage(caughtError));
         setStatus({ text: "remove failed", tone: "error" });
-      } finally {
-        setBusy(false);
       }
     },
-    [flashRedis, postJson, refresh, selectTenant, selectedTenantId]
+    [flashRoutePath, postJson, refresh, selectTenant, selectedTenantId]
   );
 
 
@@ -460,7 +490,6 @@ function PlacementMap() {
         return;
       }
 
-      setBusy(true);
       setError("");
       setStatus({ text: `creating tenant ${tenantId}…`, tone: "info" });
       try {
@@ -470,8 +499,8 @@ function PlacementMap() {
           tier: draft.tier || "free",
           reason: "created from placement map"
         });
-        flashRedis();
         setDrafts((current) => current.filter((entry) => entry.draftId !== draftId));
+        flashRoutePath();
         await refresh();
         const route = readRoute(payload);
         if (route) {
@@ -484,11 +513,9 @@ function PlacementMap() {
       } catch (caughtError) {
         setError(errorMessage(caughtError));
         setStatus({ text: "create failed", tone: "error" });
-      } finally {
-        setBusy(false);
       }
     },
-    [flashRedis, postJson, refresh, selectTenant]
+    [flashRoutePath, postJson, refresh, selectTenant]
   );
 
 
@@ -524,7 +551,7 @@ function PlacementMap() {
       topology,
       drafts,
       selectedTenantId,
-      redisFlash
+      pulsePhase
     });
     setNodes((current) => {
       const merged = mergeGraphNodes(
@@ -539,7 +566,7 @@ function PlacementMap() {
       return merged;
     });
     setEdges((current) => (edgesEqual(current, built.edges) ? current : built.edges));
-  }, [drafts, health, redisFlash, selectedTenantId, topology]);
+  }, [drafts, health, pulsePhase, selectedTenantId, topology]);
 
   useEffect(() => {
     if (loading || topology.shards.length === 0 || didFitRef.current) {
@@ -577,6 +604,18 @@ function PlacementMap() {
     [selectTenant]
   );
 
+  const relayout = useCallback(() => {
+    const built = buildGraph({
+      health,
+      topology,
+      drafts,
+      selectedTenantId,
+      pulsePhase
+    });
+    setNodes((current) => mergeGraphNodes(current, built.nodes, null));
+    setEdges((current) => (edgesEqual(current, built.edges) ? current : built.edges));
+  }, [drafts, health, pulsePhase, selectedTenantId, topology]);
+
   const onNodeDragStart: OnNodeDrag<Node<FlowNodeData>> = useCallback(
     (_event, node) => {
       if (node.type !== "tenant" || node.data.isDraft) {
@@ -610,37 +649,67 @@ function PlacementMap() {
     (event, node) => {
       draggingNodeIdRef.current = null;
       if (node.type !== "tenant" || node.data.isDraft || busy) {
+        relayout();
         return;
       }
       const tenantId = String(node.data.tenantId || "");
       if (!tenantId) {
+        relayout();
         return;
-      }
-
-      let targetShardId: string | null = null;
-      const hits = getIntersectingNodes(node, true).filter(
-        (candidate) => candidate.type === "shard"
-      );
-      if (hits[0]) {
-        targetShardId = String(
-          hits[0].data.title || hits[0].id.replace(/^shard-/, "")
-        );
-      } else if ("clientX" in event) {
-        const stack = document.elementsFromPoint(event.clientX, event.clientY);
-        const host = stack
-          .map((el) => (el instanceof Element ? el.closest("[data-shard-id]") : null))
-          .find((el): el is Element => Boolean(el));
-        targetShardId = host?.getAttribute("data-shard-id") ?? null;
       }
 
       const originShardId = dragOriginShardRef.current;
+      let targetShardId: string | null = null;
+
+      // Prefer the shard under the pointer — L→R drops often still intersect the origin.
+      if ("clientX" in event && typeof event.clientX === "number") {
+        const stack = document.elementsFromPoint(event.clientX, event.clientY);
+        for (const el of stack) {
+          if (!(el instanceof Element)) continue;
+          const host = el.closest("[data-shard-id]");
+          const id = host?.getAttribute("data-shard-id");
+          if (id) {
+            targetShardId = id;
+            break;
+          }
+        }
+      }
+
+      if (!targetShardId) {
+        const hits = getIntersectingNodes(node, true).filter(
+          (candidate) => candidate.type === "shard"
+        );
+        const ranked = [...hits].sort((left, right) => {
+          const leftId = String(
+            left.data.title || left.id.replace(/^shard-/, "")
+          );
+          const rightId = String(
+            right.data.title || right.id.replace(/^shard-/, "")
+          );
+          // Prefer a non-origin shard when the chip overlaps both.
+          if (leftId === originShardId && rightId !== originShardId) return 1;
+          if (rightId === originShardId && leftId !== originShardId) return -1;
+          return 0;
+        });
+        if (ranked[0]) {
+          targetShardId = String(
+            ranked[0].data.title || ranked[0].id.replace(/^shard-/, "")
+          );
+        }
+      }
+
       if (!targetShardId || targetShardId === originShardId) {
-        void refresh();
+        // Topology unchanged → poll refresh will not rebuild nodes; snap back now.
+        relayout();
         return;
       }
-      void moveTenant(tenantId, targetShardId);
+      void moveTenant(tenantId, targetShardId).then((moved) => {
+        if (!moved) {
+          relayout();
+        }
+      });
     },
-    [busy, getIntersectingNodes, moveTenant, refresh]
+    [busy, getIntersectingNodes, moveTenant, relayout]
   );
 
   const ensureTenant = useCallback(
@@ -648,33 +717,41 @@ function PlacementMap() {
       tenantId: string,
       shardId: string,
       tier: string,
-      reason: string
+      reason: string,
+      options?: { pulse?: boolean }
     ): Promise<void> => {
+      const pulse = options?.pulse !== false;
       const existing = topologyRef.current.shards
         .flatMap((entry) => entry.tenants)
         .find((route) => route.tenantId === tenantId);
       if (!existing) {
         await postJson("/tenants", { tenantId, shardId, tier, reason });
-        flashRedis();
+        if (pulse) {
+          flashRoutePath();
+        }
         return;
       }
       // Local API: move re-activates a disabled route (including same-shard move).
+      let wrote = false;
       if (existing.status === "disabled" || existing.shardId !== shardId) {
         await postJson(`/tenants/${encodeURIComponent(tenantId)}/move`, {
           shardId,
           reason
         });
-        flashRedis();
+        wrote = true;
       }
       if ((existing.tier || "free") !== tier) {
         await postJson(`/tenants/${encodeURIComponent(tenantId)}/tier`, {
           tier,
           reason
         });
-        flashRedis();
+        wrote = true;
+      }
+      if (wrote && pulse) {
+        flashRoutePath();
       }
     },
-    [flashRedis, postJson]
+    [flashRoutePath, postJson]
   );
 
   async function addNoisyNeighbour() {
@@ -682,10 +759,17 @@ function PlacementMap() {
     setError("");
     setDrafts([]);
     selectionLockedOffRef.current = false;
+    const quiet = { pulse: false } as const;
     try {
       setStatus({ text: "demo: crowding shard-1 with noisy-bot-1…5", tone: "info" });
       for (const tenantId of noisyNeighbourTenants) {
-        await ensureTenant(tenantId, "shard-1", "free", "noisy neighbour");
+        await ensureTenant(
+          tenantId,
+          "shard-1",
+          "free",
+          "noisy neighbour",
+          quiet
+        );
       }
       await postJson("/shards", {
         id: "shard-1",
@@ -702,7 +786,8 @@ function PlacementMap() {
         demoEnterpriseTenant,
         "shard-1",
         "enterprise",
-        "noisy neighbour enterprise"
+        "noisy neighbour enterprise",
+        quiet
       );
       await refresh();
       selectTenant(demoEnterpriseTenant);
@@ -716,7 +801,8 @@ function PlacementMap() {
         demoEnterpriseTenant,
         "shard-4",
         "enterprise",
-        "isolated from noisy neighbours"
+        "isolated from noisy neighbours",
+        quiet
       );
       await postJson("/shards", {
         id: "shard-4",
@@ -726,10 +812,11 @@ function PlacementMap() {
         loadScore: 0.12,
         status: "active"
       });
-      flashRedis();
       await refresh();
       selectTenant(demoEnterpriseTenant);
       setDemoActive(true);
+      // One path pulse for the whole demo (avoid N× ensureTenant rebuilds).
+      flashRoutePath();
       setStatus({ text: "demo: isolation complete", tone: "info" });
     } catch (caughtError) {
       setError(errorMessage(caughtError));
@@ -769,6 +856,7 @@ function PlacementMap() {
           status: "active"
         });
       }
+      flashRoutePath();
       await refresh();
       selectTenant(null);
       setDemoActive(false);
@@ -834,7 +922,7 @@ function PlacementMap() {
 
       <section className="how-strip" aria-label="How to use">
         <div className="how-hints">
-          <span><strong>Shard +</strong> = new tenant (name + Enter)</span>
+          <span><strong>Shard +</strong> = new tenant (name + <kbd>Enter</kbd>)</span>
           <span><strong>Drag tenant</strong> = MoveTenant</span>
           <span><strong>Tenant tier</strong> = change plan</span>
           <span><strong>Tenant ×</strong> = remove</span>
@@ -853,6 +941,7 @@ function PlacementMap() {
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
               onNodesChange={onNodesChange}
               onNodeClick={onNodeClick}
               onNodeDragStart={onNodeDragStart}
@@ -892,6 +981,19 @@ function PlacementMap() {
               <span><i className="legend-swatch tier-free" /> free</span>
               <span><i className="legend-swatch tier-pro" /> pro</span>
               <span><i className="legend-swatch tier-enterprise" /> enterprise</span>
+              <span className="legend-sep" aria-hidden />
+              <span title="API resolve path to the tenant's shard (placement / traffic).">
+                <i className="legend-line legend-line-solid" /> resolve → shard
+              </span>
+              <span title="Sync command write to RouteStore, or cache-miss read from Postgres.">
+                <i className="legend-line legend-line-sot" /> SoT write / cache miss
+              </span>
+              <span title="Async fan-out: RouteStore outbox → Redis Streams → API RouteCache.">
+                <i className="legend-line legend-line-dashed" /> route events
+              </span>
+              <span title="Highlighted when a tenant is selected.">
+                <i className="legend-line legend-line-selected" /> selected shard
+              </span>
             </div>
             <div className="status-dock-meta" title="Last successful topology fetch from the API (poll every 3s). Not Redis event time.">
               last fetch <span ref={syncedLabelRef}>-</span>
@@ -911,12 +1013,13 @@ const ApiNode = memo(function ApiNode({ data }: NodeProps<Node<FlowNodeData>>) {
         data.flashing ? "is-flashing" : ""
       }`}
     >
-      <Handle type="target" position={Position.Left} className="flow-handle" />
+      <Handle type="target" position={Position.Top} id="top" className="flow-handle" />
       <span className="node-kicker">resolve</span>
       <strong>{data.title}</strong>
       <span className="node-subtitle">{data.subtitle}</span>
       {data.badge ? <span className="node-badge">{data.badge}</span> : null}
-      <Handle type="source" position={Position.Right} className="flow-handle" />
+      <Handle type="source" position={Position.Right} id="right" className="flow-handle" />
+      <Handle type="source" position={Position.Left} id="to-store" className="flow-handle" />
     </div>
   );
 });
@@ -924,8 +1027,22 @@ const ApiNode = memo(function ApiNode({ data }: NodeProps<Node<FlowNodeData>>) {
 const RedisNode = memo(function RedisNode({ data }: NodeProps<Node<FlowNodeData>>) {
   return (
     <div className={`flow-node flow-node-redis ${data.flashing ? "is-flashing" : ""}`}>
-      <Handle type="source" position={Position.Bottom} className="flow-handle" />
+      <Handle type="target" position={Position.Top} id="top" className="flow-handle" />
+      <Handle type="source" position={Position.Bottom} id="bottom" className="flow-handle" />
       <span className="node-kicker">events</span>
+      <strong>{data.title}</strong>
+      <span className="node-subtitle">{data.subtitle}</span>
+      {data.badge ? <span className="node-badge">{data.badge}</span> : null}
+    </div>
+  );
+});
+
+const PostgresNode = memo(function PostgresNode({ data }: NodeProps<Node<FlowNodeData>>) {
+  return (
+    <div className={`flow-node flow-node-postgres ${data.flashing ? "is-flashing" : ""}`}>
+      <Handle type="target" position={Position.Left} id="from-api" className="flow-handle" />
+      <Handle type="source" position={Position.Bottom} id="to-redis" className="flow-handle" />
+      <span className="node-kicker">source of truth</span>
       <strong>{data.title}</strong>
       <span className="node-subtitle">{data.subtitle}</span>
       {data.badge ? <span className="node-badge">{data.badge}</span> : null}
@@ -1130,8 +1247,43 @@ const TenantNode = memo(function TenantNode({ data }: NodeProps<Node<FlowNodeDat
 const nodeTypes = {
   api: ApiNode,
   redis: RedisNode,
+  postgres: PostgresNode,
   shard: ShardNode,
   tenant: TenantNode
+};
+
+/** Route API→shard over the top rail so lines stay above shards (no node moves). */
+const AroundTopEdge = memo(function AroundTopEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  style,
+  markerEnd,
+  markerStart
+}: EdgeProps) {
+  const railY = 10;
+  // Verticals at sourceX / targetX — avoids overlapping stubs when shard-1 sits next to the API.
+  const path = [
+    `M ${sourceX},${sourceY}`,
+    `L ${sourceX},${railY}`,
+    `L ${targetX},${railY}`,
+    `L ${targetX},${targetY}`
+  ].join(" ");
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      style={style}
+      markerEnd={markerEnd}
+      markerStart={markerStart}
+    />
+  );
+});
+
+const edgeTypes = {
+  aroundTop: AroundTopEdge
 };
 
 function buildGraph({
@@ -1139,14 +1291,17 @@ function buildGraph({
   topology,
   drafts,
   selectedTenantId,
-  redisFlash
+  pulsePhase
 }: {
   health: HealthSnapshot | null;
   topology: TopologySnapshot;
   drafts: DraftTenant[];
   selectedTenantId: string | null;
-  redisFlash: boolean;
+  pulsePhase: "off" | "store" | "redis" | "api";
 }): { nodes: Node<FlowNodeData>[]; edges: Edge[] } {
+  const pulseStore = pulsePhase === "store";
+  const pulseRedis = pulsePhase === "redis";
+  const pulseApi = pulsePhase === "api";
   const selected = topology.shards
     .flatMap((entry) => entry.tenants)
     .find(
@@ -1156,17 +1311,32 @@ function buildGraph({
 
   const nodes: Node<FlowNodeData>[] = [
     {
+      id: "routestore",
+      type: "postgres",
+      position: { x: 24, y: 40 },
+      data: {
+        kind: "postgres",
+        title: "RouteStore",
+        subtitle: "routing-postgres · tenantId → shardId",
+        badge: "postgres",
+        flashing: pulseStore
+      },
+      draggable: false,
+      selectable: false,
+      zIndex: 2
+    },
+    {
       id: "redis",
       type: "redis",
-      position: { x: 24, y: 40 },
+      position: { x: 24, y: 200 },
       data: {
         kind: "redis",
         title: "Redis Streams",
         subtitle: health?.streamKey
-          ? `route-change fan-out · ${health.streamKey}`
+          ? `fan-out · ${health.streamKey}`
           : "route-change fan-out",
         badge: "redis",
-        flashing: redisFlash
+        flashing: pulseRedis
       },
       draggable: false,
       selectable: false,
@@ -1175,14 +1345,14 @@ function buildGraph({
     {
       id: "api",
       type: "api",
-      position: { x: 24, y: 200 },
+      position: { x: 24, y: 360 },
       data: {
         kind: "api",
         title: "API + RouteCache",
         subtitle: health ? `API instance ${health.instanceId}` : "waiting for API",
         badge: health?.cache || "sqlite",
         highlighted: Boolean(selected),
-        flashing: redisFlash
+        flashing: pulseApi
       },
       draggable: false,
       selectable: false,
@@ -1210,7 +1380,7 @@ function buildGraph({
       data: {
         kind: "shard",
         title: entry.shard.id,
-        subtitle: entry.shard.name || entry.shard.region || "PostgreSQL shard",
+        subtitle: entry.shard.name || entry.shard.region || "data shard",
         badge: "postgres",
         loadScore: entry.shard.loadScore,
         tenantCount: activeTenants.length + shardDrafts.length,
@@ -1271,23 +1441,59 @@ function buildGraph({
 
   const edges: Edge[] = topology.shards.map((entry) => ({
     id: `api-${entry.shard.id}`,
+    type: "aroundTop",
     source: "api",
+    sourceHandle: "right",
     target: `shard-${entry.shard.id}`,
     animated: selectedShardId === entry.shard.id,
+    zIndex: 30,
     style: {
-      stroke: selectedShardId === entry.shard.id ? "#59a8ff" : "#3a4a5c",
+      stroke: selectedShardId === entry.shard.id ? "#59a8ff" : "#8fa3bb",
       strokeWidth: selectedShardId === entry.shard.id ? 2.5 : 1.5
     }
   }));
 
+  // Sync SoT path: command write + cache-miss read (teal dotted — distinct from resolve solid).
+  edges.push({
+    id: "api-routestore",
+    source: "api",
+    sourceHandle: "to-store",
+    target: "routestore",
+    targetHandle: "from-api",
+    animated: pulseStore,
+    style: {
+      stroke: pulseStore ? "#f0b429" : "#6db3a0",
+      strokeWidth: pulseStore ? 2.5 : 1.5,
+      strokeDasharray: "2 4"
+    }
+  });
+
+  // Outbox: RouteStore → Redis Streams.
+  edges.push({
+    id: "routestore-redis",
+    source: "routestore",
+    sourceHandle: "to-redis",
+    target: "redis",
+    targetHandle: "top",
+    animated: pulseStore || pulseRedis,
+    style: {
+      stroke: pulseStore || pulseRedis ? "#f0b429" : "#4a5563",
+      strokeWidth: pulseStore || pulseRedis ? 2.5 : 1.25,
+      strokeDasharray: "5 4"
+    }
+  });
+
+  // Fan-out: Redis → API RouteCache invalidate/refresh.
   edges.push({
     id: "redis-api",
     source: "redis",
+    sourceHandle: "bottom",
     target: "api",
-    animated: redisFlash,
+    targetHandle: "top",
+    animated: pulseRedis || pulseApi,
     style: {
-      stroke: redisFlash ? "#f0b429" : "#4a5563",
-      strokeWidth: redisFlash ? 2.5 : 1.25,
+      stroke: pulseRedis || pulseApi ? "#f0b429" : "#4a5563",
+      strokeWidth: pulseRedis || pulseApi ? 2.5 : 1.25,
       strokeDasharray: "5 4"
     }
   });

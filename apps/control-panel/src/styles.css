@@ -184,6 +184,59 @@ h2 {
   vertical-align: middle;
 }
 
+.legend-sep {
+  display: inline-block;
+  width: 1px;
+  height: 12px;
+  background: #2b3a4d;
+  margin: 0 2px;
+  vertical-align: middle;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  border-top: 2px solid #8fa3bb;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.legend-line-solid {
+  border-top-style: solid;
+}
+
+.legend-line-dashed {
+  border-top-style: dashed;
+  border-top-color: #4a5563;
+}
+
+.legend-line-selected {
+  border-top-style: solid;
+  border-top-color: #59a8ff;
+  border-top-width: 2.5px;
+}
+
+.legend-line-sot {
+  border-top-style: dotted;
+  border-top-color: #6db3a0;
+}
+
+kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid #3d5270;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: #121a24;
+  color: #c5d2e3;
+  font: 600 11px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.react-flow__edges {
+  z-index: 3 !important;
+}
+
 .tier-free {
   background: var(--free);
 }
@@ -196,29 +249,7 @@ h2 {
   background: var(--enterprise);
 }
 
-.drawer-empty h2 {
-  margin-bottom: 4px;
-}
-
-.hint code {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  font-size: 11px;
-  color: #c7dbff;
-}
-
-.field input,
-.field select,
-.table-select {
-  width: 100%;
-  border: 1px solid var(--panel-border);
-  background: #0a1017;
-  color: var(--text);
-  border-radius: 10px;
-  padding: 10px 12px;
-}
-
 .button,
-.icon-button,
 .chip-add {
   border: 1px solid transparent;
   border-radius: 10px;
@@ -271,17 +302,19 @@ h2 {
 }
 
 .flow-node-api,
-.flow-node-redis {
+.flow-node-redis,
+.flow-node-postgres {
   width: 260px;
   display: grid;
   gap: 6px;
 }
 
 .flow-node-api .node-subtitle,
-.flow-node-redis .node-subtitle {
+.flow-node-redis .node-subtitle,
+.flow-node-postgres .node-subtitle {
   white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-all;
+  overflow-wrap: break-word;
+  word-break: normal;
   line-height: 1.35;
 }
 
@@ -357,7 +390,7 @@ h2 {
   gap: 4px;
   width: 100%;
   text-align: left;
-  padding: 10px 12px;
+  padding: 10px 28px 10px 12px;
   border-radius: 12px;
   border: 1px solid #2b3a4d;
   background: #0d1520;
@@ -520,15 +553,6 @@ h2 {
   font-variant-numeric: tabular-nums;
 }
 
-.status-dock .alert {
-  margin: 0;
-}
-
-.move-grid .button {
-  padding: 8px 10px;
-  font-size: 12px;
-}
-
 .flow-tenant-node {
   cursor: grab;
 }
@@ -538,8 +562,6 @@ h2 {
 }
 
 .shard-heading {
-  display: grid;
-  gap: 4px;
   display: grid;
   gap: 6px;
 }
@@ -601,11 +623,6 @@ h2 {
 
 .tenant-chip.tier-enterprise .chip-tier-select {
   color: var(--enterprise);
-}
-
-.tenant-chip {
-  position: relative;
-  padding-right: 28px;
 }
 
 .chip-close {
