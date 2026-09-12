@@ -712,7 +712,7 @@ kbd {
   margin-top: 0;
   min-height: 0;
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .status-dock-footer {
@@ -748,6 +748,8 @@ kbd {
 }
 
 .status-dock-line {
+  flex: 1 1 220px;
+  min-width: 0;
   height: 20px;
   min-height: 20px;
   line-height: 20px;
@@ -834,4 +836,40 @@ kbd {
   display: grid;
   gap: 6px;
   min-width: 0;
+}
+
+.status-dock-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 20px;
+}
+
+.status-dock-footer .status-dock-meta {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+
+
+.resolve-edge-label {
+  position: absolute;
+  pointer-events: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(12, 18, 28, 0.88);
+  border: 1px solid rgba(143, 163, 187, 0.35);
+  white-space: nowrap;
+}
+
+.resolve-edge-label.hit {
+  color: #3dd68c;
+}
+
+.resolve-edge-label.miss {
+  color: #ff6b7a;
 }

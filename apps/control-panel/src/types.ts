@@ -7,7 +7,6 @@ export interface HealthSnapshot {
   routingPoolMax: number;
   shardPoolMax: number;
   maxDemoShards: number;
-  shardPoolCount: number;
 }
 
 export interface TenantRoute {
@@ -81,4 +80,10 @@ export interface PlacementActions {
   onDraftTierChange: (draftId: string, tier: string) => void;
   onCommitDraft: (draftId: string, name: string) => void;
   onCancelDraft: (draftId: string) => void;
+}
+
+/** Slim view for the resolve-edge cache label (not a full route DTO). */
+export interface ResolvedRouteView {
+  tenantId: string;
+  cacheHit: boolean;
 }

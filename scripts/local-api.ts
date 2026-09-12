@@ -60,7 +60,8 @@ const topology = createRouteTopologyReader({
 const commands = createTenantRouteCommands({
   routeRegistry: routeStore,
   shardRegistry: routeStore,
-  events
+  events,
+  // Visible cutover window for the placement demo (lookup already updated).
 });
 const shardPools = createShardPools(shardPoolMax);
 const tenantClientResolver = createTenantShardClientResolver({
@@ -97,14 +98,17 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/topology") {
-      writeJson(response, 200, await topology.getTopologySnapshot());
+      writeJson(response, 200, withDemoLoadScores(await topology.getTopologySnapshot()));
       return;
     }
 
     const routeMatch = /^\/route\/([^/]+)$/.exec(requestUrl.pathname);
     if (request.method === "GET" && routeMatch) {
       const tenantId = decodeURIComponent(routeMatch[1]);
-      const explanation = await router.explain(tenantId);
+      const bypassCache =
+        requestUrl.searchParams.get("bypassCache") === "1" ||
+        requestUrl.searchParams.get("bypassCache") === "true";
+      const explanation = await router.explain(tenantId, { bypassCache });
       if (!explanation.route) {
         writeJson(response, 404, {
           error: "TENANT_ROUTE_NOT_FOUND",
@@ -114,13 +118,23 @@ const server = createServer(async (request, response) => {
         return;
       }
 
-      const resolved = await tenantClientResolver.resolve(tenantId);
+      let shardClientAvailable = false;
+      try {
+        await tenantClientResolver.resolve(tenantId);
+        shardClientAvailable = true;
+      } catch (error) {
+        if (!(error instanceof TenantShardClientNotFoundError)) {
+          throw error;
+        }
+      }
+
       writeJson(response, 200, {
         instanceId,
         cacheHit: explanation.cacheHit,
         source: explanation.source,
-        route: resolved.route,
-        shardClientAvailable: true
+        routeVersion: explanation.routeVersion,
+        route: explanation.route,
+        shardClientAvailable
       });
       return;
     }
@@ -258,6 +272,27 @@ process.once("SIGINT", () => {
 process.once("SIGTERM", () => {
   void close().then(() => process.exit(0));
 });
+
+
+/** Demo load: active tenants / soft cap (5 ⇒ 100%). Not real DB QPS. */
+const demoLoadSoftCap = 5;
+
+function withDemoLoadScores(snapshot: Awaited<ReturnType<typeof topology.getTopologySnapshot>>) {
+  return {
+    ...snapshot,
+    shards: snapshot.shards.map((entry) => {
+      const active = entry.tenants.filter((tenant) => tenant.status !== "disabled").length;
+      return {
+        ...entry,
+        tenantCount: active,
+        shard: {
+          ...entry.shard,
+          loadScore: Math.min(1, active / demoLoadSoftCap)
+        }
+      };
+    })
+  };
+}
 
 function createShardPools(poolMax: number): Map<string, Pool> {
   const pools = new Map<string, Pool>();

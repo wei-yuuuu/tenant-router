@@ -7,7 +7,7 @@ export interface TenantRoute<TMetadata = Record<string, unknown>> {
   shardId: string;
   routeVersion: RouteVersion;
   tier?: TenantTier;
-  status?: "active" | "moving" | "disabled" | (string & {});
+  status?: "active" | "disabled" | (string & {});
   reason?: string;
   updatedAt?: Date | string | number;
   metadata?: TMetadata;
@@ -840,7 +840,8 @@ export class TenantRouteCommands {
   private async writeRoute(
     type: Extract<RouteEventType, string>,
     input: AssignTenantToShardInput,
-    previous: TenantRoute | null | undefined
+    previous: TenantRoute | null | undefined,
+    status: "active" | "disabled" = "active"
   ): Promise<TenantRoute> {
     const shardId = normalizeShardId(input.shardId);
     await this.requireShard(shardId);
@@ -849,7 +850,7 @@ export class TenantRouteCommands {
       shardId,
       routeVersion: (previous?.routeVersion ?? 0) + 1,
       tier: input.tier ?? previous?.tier,
-      status: "active",
+      status,
       reason: input.reason ?? previous?.reason,
       metadata: input.metadata ?? previous?.metadata,
       updatedAt: this.now()
@@ -1270,6 +1271,7 @@ const SOURCE_SCORE = Object.freeze({
   host: 3000,
   path: 2000
 });
+
 
 export class TenantRouterError extends Error {
   code: string;

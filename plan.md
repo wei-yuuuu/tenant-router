@@ -251,7 +251,7 @@ type TenantRoute = {
   tier: "free" | "pro" | "enterprise";
   shardId: string;
   routeVersion: number;
-  status: "active" | "moving" | "disabled";
+  status: "active" | "disabled";
   updatedAt: string;
 };
 ```
@@ -285,69 +285,60 @@ type RoutingEvent = {
 
 ## Milestones
 
-### 1. Library scaffold
+Status key: **done** / **partial** / **not started** / **won't do (for now)**.
 
-- Choose final repo name.
-- Create Node 24.16 TypeScript monorepo.
-- Add `packages/core`, `packages/redis`, `packages/postgres`, and `packages/fastify`.
-- Add `packages/react-demo` only as a consumer of the library.
-- Add Redis and shard containers through Docker Compose.
+### 1. Library scaffold — **partial**
+- [x] Repo name `tenant-router`, Node 24.16 + TypeScript
+- [x] Docker Compose: Redis, routing Postgres, shard Postgres, local API, control panel
+- [x] Adapters as `src/index.ts` + `src/postgres.ts` + `src/redis.ts` + `src/node.ts` (SQLite cache)
+- [ ] Monorepo `packages/core|redis|postgres|fastify` — **won't do (for now)**; single package + `apps/control-panel` is enough
+- [ ] Fastify plugin package — **won't do (for now)**
 
-### 2. Core library API
+### 2. Core library API — **done**
+- [x] `createTenantRouter`, route resolve, route versions, cache policy
+- [x] `RouteStore` / events / cache interfaces; memory fakes + tests
+- [x] Commands: create, assign, move, tier, disable, provision, delete shard
+- [x] Queries: topology, shard load, `explain` (cache vs store)
 
-- Implement `createTenantRouter`.
-- Define `RouteStore`, `RouteEventBus`, `RouteCache`, and `ShardResolver` interfaces.
-- Implement route resolution, route version checks, and cache policy.
-- Add typed command/query contracts.
-- Add tests with fake in-memory adapters.
+### 3. Routing source of truth adapters — **done**
+- [x] Postgres metadata + outbox; Redis Streams fan-out
+- [x] Local API command/query HTTP for demos (not a production gateway)
 
-### 3. Routing source of truth adapters
+### 4. API local cache — **done**
+- [x] SQLite (and memory) route cache; warmup; subscribe/invalidate
+- [x] `explain` exposes cacheHit / source / routeVersion (control panel shows on tenant select)
 
-- Implement command handlers for tenant and shard management.
-- Persist routing metadata.
-- Publish routing events to Redis Streams.
-- Add query endpoints for route lookup and topology snapshot.
+### 5. Shard simulation example — **partial**
+- [x] Multiple shard DBs in Compose; resolve → pool when wired
+- [x] Demo `loadScore` auto from active tenant count / soft cap 5 (local topology); not real DB QPS
+- [ ] Synthetic per-tenant load / automatic noisy detection — **not started**
+- [ ] Metadata-only provisioned shards have no pool until `SHARD_N_DATABASE_URL` — intentional for demo
 
-### 4. API local cache
+### 6. Interactive demo UI — **partial**
+- [x] React Flow topology: RouteStore, Redis, API+cache, shards, tier-colored tenants
+- [x] Path flash on writes; drag MoveTenant; create/tier/disable; provision/delete shard
+- [x] Noisy-neighbour stepped demo; selected tenant resolve strip (cache/store/version/pool)
+- [ ] Separate cache node + stale-vs-fresh animation — **not started**
+- [ ] Full event log dock — **not started**
+- [ ] TanStack Query / Lucide — **won't do (for now)**; plain fetch is fine
 
-- Add in-memory routing cache.
-- Load route table on startup.
-- Subscribe to routing events.
-- Refresh or invalidate affected routes.
-- Expose cache freshness and route version in query responses.
+### 7. Operational scenarios — **partial**
+- [x] Free tenants on shared shard; noisy crowd + MoveTenant isolate
+- [x] Provision shard + move onto it (routing metadata; optional physical DB)
+- [x] Cache updates via Redis after commands (verify with resolve strip / multi-API compose)
+- [ ] Enterprise "dedicated shard policy" engine — **not started** (tier is a label + manual placement)
+- [ ] Real data migration (dual-read/write, copy job) — **won't do (for now)**; moves update the lookup row only
 
-### 5. Shard simulation example
+## Open Questions (resolved for this repo)
 
-- Create multiple shard databases.
-- Route tenant reads/writes through the resolved shard.
-- Add synthetic load per tenant.
-- Calculate shard load and noisy-neighbour indicators.
-
-### 6. Interactive demo UI
-
-- Build topology canvas.
-- Display tenants, API, cache, Redis, broker, and shards.
-- Highlight active request path.
-- Add operator controls for tenant creation, tier change, shard provisioning, and tenant moves.
-- Show event log and cache propagation state.
-
-### 7. Operational scenarios
-
-- Demo: create free tenant and route to shared shard.
-- Demo: enterprise tenant gets dedicated shard.
-- Demo: noisy free tenant causes overload.
-- Demo: operator provisions shard and moves tenant.
-- Demo: API cache updates through Redis event.
-
-## Open Questions
-
-- Should the first shard implementation use PostgreSQL or SQLite?
-- Do we want full event sourcing, or CQRS with a normal metadata table plus Redis event stream?
-- Should tenant moves be immediate for the MVP, or model a realistic migration state machine?
-- Should Redis be treated as the source of truth for routing metadata, or only as event/cache infrastructure?
-- Should the demo UI be an educational simulator, or look like a real internal operations console?
+- First shards: **PostgreSQL** (routing metadata + business shard DBs); SQLite only for per-API route cache.
+- CQRS shape: **metadata table + Redis stream / outbox**, not full event sourcing.
+- Tenant moves (MVP): **immediate lookup update** to the new `shardId`. No business-data copy between shard DBs.
+- Redis: **events/cache fan-out only**; Postgres is routing SoT.
+- Demo UI: **educational ops console** (Placement Map), not a separate product.
 
 ## Current Recommendation
+
 
 For the first build, keep the library boring but resilient:
 

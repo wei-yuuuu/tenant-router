@@ -14,6 +14,7 @@ import {
   Background,
   BaseEdge,
   Controls,
+  EdgeLabelRenderer,
   Handle,
   Position,
   ReactFlow,
@@ -32,6 +33,7 @@ import type {
   DraftTenant,
   FlowNodeData,
   HealthSnapshot,
+  ResolvedRouteView,
   PlacementActions,
   ShardTopology,
   TenantRoute,
@@ -78,7 +80,7 @@ const demoStepCopy: Record<
   1: {
     title: "1/4 Crowd free noisy neighbours",
     detail:
-      "Create free noisy-bot-1…5 on shard-1 and annotate loadScore 0.92 (ops signal that the shard feels hot — not auto-metered usage)."
+      "Create free noisy-bot-1…5 on shard-1. Load rises with active tenant count (demo: 5 tenants ⇒ 100%)."
   },
   2: {
     title: "2/4 Enterprise joins the crowded shard",
@@ -88,12 +90,12 @@ const demoStepCopy: Record<
   3: {
     title: "3/4 Isolate with MoveTenant",
     detail:
-      "Atomically update RouteStore: move enterprise-acme to shard-4 and annotate load 0.12. Isolation is one row change — no hash special-case."
+      "MoveTenant: lookup row points enterprise-acme at shard-4. Isolation is one route change — no data copy."
   },
   4: {
     title: "4/4 Done — isolation complete",
     detail:
-      "Enterprise is on a quiet shard via the lookup table. Reset clears demo tenants and annotated loadScores."
+      "Enterprise is on a quieter shard via the lookup table. Reset clears demo tenants; load follows remaining counts."
   }
 };
 
@@ -173,7 +175,7 @@ function mergeGraphNodes(
     return {
       ...node,
       selected: prev.selected,
-      dragging: prev.dragging
+      dragging: false
     };
   });
   if (!changed) {
@@ -199,8 +201,7 @@ function healthEqual(a: HealthSnapshot | null, b: HealthSnapshot | null): boolea
     a.streamKey === b.streamKey &&
     a.routingPoolMax === b.routingPoolMax &&
     a.shardPoolMax === b.shardPoolMax &&
-    a.maxDemoShards === b.maxDemoShards &&
-    a.shardPoolCount === b.shardPoolCount
+    a.maxDemoShards === b.maxDemoShards
   );
 }
 
@@ -251,7 +252,9 @@ function edgesEqual(a: Edge[], b: Edge[]): boolean {
       left.targetHandle !== right.targetHandle ||
       left.animated !== right.animated ||
       left.zIndex !== right.zIndex ||
-      JSON.stringify(left.style ?? null) !== JSON.stringify(right.style ?? null)
+      left.label !== right.label ||
+      JSON.stringify(left.style ?? null) !== JSON.stringify(right.style ?? null) ||
+      JSON.stringify(left.data ?? null) !== JSON.stringify(right.data ?? null)
     ) {
       return false;
     }
@@ -271,6 +274,12 @@ function PlacementMap() {
   const [health, setHealth] = useState<HealthSnapshot | null>(null);
   const [topology, setTopology] = useState<TopologySnapshot>(emptyTopology);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
+  const [resolvedRoute, setResolvedRoute] = useState<ResolvedRouteView | null>(null);
+  /** Optimistic shard while MoveTenant is in flight (slot position, not free-drag coords). */
+  const [pendingMove, setPendingMove] = useState<{
+    tenantId: string;
+    shardId: string;
+  } | null>(null);
   const [drafts, setDrafts] = useState<DraftTenant[]>([]);
   const [busy, setBusy] = useState(false);
   // Write-path pulse: RouteStore → Redis → API cache (see flashRoutePath).
@@ -290,9 +299,11 @@ function PlacementMap() {
 
   const [nodes, setNodes] = useState<Node<FlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  const resolveCacheHit =
+    resolvedRoute && resolvedRoute.tenantId === selectedTenantId
+      ? resolvedRoute.cacheHit
+      : null;
 
-  const selectionLockedOffRef = useRef(false);
-  const autoSelectedRef = useRef(false);
   const topologyRef = useRef(topology);
   const draftsRef = useRef(drafts);
   const didFitRef = useRef(false);
@@ -313,6 +324,31 @@ function PlacementMap() {
   useEffect(() => {
     demoStepRef.current = demoStep;
   }, [demoStep]);
+
+  useEffect(() => {
+    if (!selectedTenantId) {
+      setResolvedRoute(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchResolvedRoute(selectedTenantId)
+      .then((view) => {
+        if (cancelled) return;
+        setResolvedRoute((current) =>
+          current &&
+          current.tenantId === view.tenantId &&
+          current.cacheHit === view.cacheHit
+            ? current
+            : view
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedRoute(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTenantId]);
 
   useEffect(() => {
     return () => {
@@ -346,12 +382,6 @@ function PlacementMap() {
   }, []);
 
   const selectTenant = useCallback((tenantId: string | null) => {
-    if (tenantId === null) {
-      selectionLockedOffRef.current = true;
-      setSelectedTenantId(null);
-      return;
-    }
-    selectionLockedOffRef.current = false;
     setSelectedTenantId(tenantId);
   }, []);
 
@@ -385,16 +415,6 @@ function PlacementMap() {
         )
       );
       setDemoActive(demoPresent);
-
-      if (!autoSelectedRef.current && !selectionLockedOffRef.current) {
-        const first = nextTopology.shards
-          .flatMap((entry) => entry.tenants)
-          .find((tenant) => tenant.status !== "disabled");
-        if (first) {
-          autoSelectedRef.current = true;
-          setSelectedTenantId(first.tenantId);
-        }
-      }
     } catch (caughtError) {
       if (gen !== refreshGenRef.current) {
         return;
@@ -433,27 +453,34 @@ function PlacementMap() {
 
       setError("");
       const fromShardId = current.shardId;
-      setStatus({ text: `moving tenant ${tenantId}…`, tone: "info" });
+      setStatus({ text: `move tenant ${tenantId}…`, tone: "info" });
       try {
         const payload = await postJson(
           `/tenants/${encodeURIComponent(tenantId)}/move`,
           { shardId, reason: "moved from placement map" }
         );
-        flashRoutePath();
-        await refresh();
         const route = readRoute(payload);
+        // Patch local topology from the response so clearing pendingMove cannot
+        // snap the chip back if a concurrent poll refresh was discarded.
         if (route) {
+          setTopology((current) => {
+            const next = upsertTenantRoute(current, route);
+            topologyRef.current = next;
+            return next;
+          });
           selectTenant(route.tenantId);
           setStatus({
             text: `move tenant ${route.tenantId} from ${fromShardId} to ${route.shardId}`,
             tone: "info"
           });
         }
+        flashRoutePath();
+        void refresh();
         return true;
       } catch (caughtError) {
         setError(errorMessage(caughtError));
         setStatus({ text: "move failed", tone: "error" });
-        await refresh();
+        void refresh();
         return false;
       }
     },
@@ -674,8 +701,10 @@ function PlacementMap() {
       topology,
       drafts,
       selectedTenantId,
+      resolveCacheHit,
       pulsePhase,
-      busy
+      busy,
+      pendingMove
     });
     setNodes((current) => {
       const merged = mergeGraphNodes(
@@ -690,7 +719,16 @@ function PlacementMap() {
       return merged;
     });
     setEdges((current) => (edgesEqual(current, built.edges) ? current : built.edges));
-  }, [busy, drafts, health, pulsePhase, selectedTenantId, topology]);
+  }, [
+    busy,
+    drafts,
+    health,
+    pendingMove,
+    pulsePhase,
+    resolveCacheHit,
+    selectedTenantId,
+    topology
+  ]);
 
   useEffect(() => {
     if (loading || topology.shards.length === 0 || didFitRef.current) {
@@ -722,11 +760,18 @@ function PlacementMap() {
         const tenantId = String(node.data.tenantId || "");
         if (tenantId) {
           selectTenant(tenantId);
+          return;
         }
       }
+      // Clicking a non-tenant node clears resolve selection.
+      selectTenant(null);
     },
     [selectTenant]
   );
+
+  const onPaneClick = useCallback(() => {
+    selectTenant(null);
+  }, [selectTenant]);
 
   const relayout = useCallback(() => {
     const built = buildGraph({
@@ -734,12 +779,23 @@ function PlacementMap() {
       topology,
       drafts,
       selectedTenantId,
+      resolveCacheHit,
       pulsePhase,
-      busy
+      busy,
+      pendingMove
     });
     setNodes((current) => mergeGraphNodes(current, built.nodes, null));
     setEdges((current) => (edgesEqual(current, built.edges) ? current : built.edges));
-  }, [busy, drafts, health, pulsePhase, selectedTenantId, topology]);
+  }, [
+    busy,
+    drafts,
+    health,
+    pendingMove,
+    pulsePhase,
+    resolveCacheHit,
+    selectedTenantId,
+    topology
+  ]);
 
   const onNodeDragStart: OnNodeDrag<Node<FlowNodeData>> = useCallback(
     (_event, node) => {
@@ -772,13 +828,14 @@ function PlacementMap() {
 
   const onNodeDragStop: OnNodeDrag<Node<FlowNodeData>> = useCallback(
     (event, node) => {
-      draggingNodeIdRef.current = null;
       if (node.type !== "tenant" || node.data.isDraft || busy) {
+        draggingNodeIdRef.current = null;
         relayout();
         return;
       }
       const tenantId = String(node.data.tenantId || "");
       if (!tenantId) {
+        draggingNodeIdRef.current = null;
         relayout();
         return;
       }
@@ -825,13 +882,16 @@ function PlacementMap() {
 
       if (!targetShardId || targetShardId === originShardId) {
         // Topology unchanged → poll refresh will not rebuild nodes; snap back now.
+        draggingNodeIdRef.current = null;
+        setPendingMove(null);
         relayout();
         return;
       }
-      void moveTenant(tenantId, targetShardId).then((moved) => {
-        if (!moved) {
-          relayout();
-        }
+      // Place on the target shard slot immediately; don't keep the free-drag coords.
+      draggingNodeIdRef.current = null;
+      setPendingMove({ tenantId, shardId: targetShardId });
+      void moveTenant(tenantId, targetShardId).finally(() => {
+        setPendingMove(null);
       });
     },
     [busy, getIntersectingNodes, moveTenant, relayout]
@@ -895,7 +955,6 @@ function PlacementMap() {
       showDemoStep(step);
       setError("");
       setDrafts([]);
-      selectionLockedOffRef.current = false;
 
       if (step === 1) {
         for (const tenantId of noisyNeighbourTenants) {
@@ -909,14 +968,6 @@ function PlacementMap() {
           await refresh();
           await wait(demoBotStaggerMs);
         }
-        await postJson("/shards", {
-          id: "shard-1",
-          name: "Local shard 1",
-          region: "local",
-          capacity: 1000,
-          loadScore: 0.92,
-          status: "active"
-        });
         await refresh();
         setDemoActive(true);
         return;
@@ -942,14 +993,6 @@ function PlacementMap() {
         "isolated from noisy neighbours",
         quiet
       );
-      await postJson("/shards", {
-        id: "shard-4",
-        name: "Local shard 4",
-        region: "local",
-        capacity: 1000,
-        loadScore: 0.12,
-        status: "active"
-      });
       await refresh();
       selectTenant(demoEnterpriseTenant);
       setDemoActive(true);
@@ -1003,16 +1046,6 @@ function PlacementMap() {
         } catch {
           // ignore
         }
-      }
-      for (const shardId of ["shard-1", "shard-2", "shard-3", "shard-4"]) {
-        await postJson("/shards", {
-          id: shardId,
-          name: `Local shard ${shardId.slice(-1)}`,
-          region: "local",
-          capacity: 1000,
-          loadScore: 0,
-          status: "active"
-        });
       }
       flashRoutePath();
       await refresh();
@@ -1076,7 +1109,7 @@ function PlacementMap() {
               className="button button-secondary button-compact"
               type="button"
               disabled={busy || (!demoActive && demoStep === 0)}
-              title="Disable demo tenants and clear annotated shard loadScores."
+              title="Disable demo tenants."
               onClick={() => void resetNoisyNeighbour()}
             >
               Reset
@@ -1122,6 +1155,7 @@ function PlacementMap() {
               edgeTypes={edgeTypes}
               onNodesChange={onNodesChange}
               onNodeClick={onNodeClick}
+              onPaneClick={onPaneClick}
               onNodeDragStart={onNodeDragStart}
               onNodeDragStop={onNodeDragStop}
               fitViewOptions={fitViewOptions}
@@ -1147,29 +1181,31 @@ function PlacementMap() {
 
       <footer className="bottom-dock">
         <div className="status-dock" aria-live="polite">
-          <div
-            className={`status-dock-line ${
-              error || status.tone === "error"
-                ? "is-error"
-                : status.tone === "info" || demoStep > 0
-                  ? "is-info"
-                  : ""
-            }`}
-            title={
-              error
+          <div className="status-dock-row">
+            <div
+              className={`status-dock-line ${
+                error || status.tone === "error"
+                  ? "is-error"
+                  : status.tone === "info" || demoStep > 0
+                    ? "is-info"
+                    : ""
+              }`}
+              title={
+                error
+                  ? error
+                  : demoStep > 0
+                    ? demoStepCopy[demoStep as Exclude<DemoStepId, 0>].detail
+                    : undefined
+              }
+            >
+              {error
                 ? error
                 : demoStep > 0
-                  ? demoStepCopy[demoStep as Exclude<DemoStepId, 0>].detail
-                  : undefined
-            }
-          >
-            {error
-              ? error
-              : demoStep > 0
-                ? `${demoStepCopy[demoStep as Exclude<DemoStepId, 0>].title} — ${
-                    demoStepCopy[demoStep as Exclude<DemoStepId, 0>].detail
-                  }`
-                : status.text}
+                  ? `${demoStepCopy[demoStep as Exclude<DemoStepId, 0>].title} — ${
+                      demoStepCopy[demoStep as Exclude<DemoStepId, 0>].detail
+                    }`
+                  : status.text}
+            </div>
           </div>
           <div className="status-dock-footer">
             <div className="flow-legend">
@@ -1177,7 +1213,7 @@ function PlacementMap() {
               <span><i className="legend-swatch tier-pro" /> pro</span>
               <span><i className="legend-swatch tier-enterprise" /> enterprise</span>
               <span className="legend-sep" aria-hidden />
-              <span title="API resolve path to the tenant's shard (placement / traffic).">
+              <span title="API resolve path to the selected tenant’s shard; label shows cache hit/miss.">
                 <i className="legend-line legend-line-solid" /> resolve → shard
               </span>
               <span title="Sync command write to RouteStore, or cache-miss read from Postgres.">
@@ -1288,7 +1324,7 @@ const ShardNode = memo(function ShardNode({ data }: NodeProps<Node<FlowNodeData>
         data.highlighted ? "is-highlighted" : ""
       }`}
     >
-      <Handle type="target" position={Position.Left} className="flow-handle" />
+      <Handle type="target" position={Position.Top} id="top" className="flow-handle" />
       <div className="shard-topline">
         <div className="shard-heading">
           <span className="node-kicker">shard</span>
@@ -1521,14 +1557,77 @@ const AroundTopEdge = memo(function AroundTopEdge({
   targetY,
   style,
   markerEnd,
-  markerStart
+  markerStart,
+  data
 }: EdgeProps) {
   const railY = 10;
-  // Verticals at sourceX / targetX — avoids overlapping stubs when shard-1 sits next to the API.
+  // Stub right from the API handle first, then up to the top rail, then down into shard top-center.
+  const stubX = sourceX + 18;
   const path = [
     `M ${sourceX},${sourceY}`,
-    `L ${sourceX},${railY}`,
+    `L ${stubX},${sourceY}`,
+    `L ${stubX},${railY}`,
     `L ${targetX},${railY}`,
+    `L ${targetX},${targetY}`
+  ].join(" ");
+  const cacheHit = data && typeof data === "object" ? data.cacheHit : undefined;
+  const showCache =
+    typeof cacheHit === "boolean" ? (cacheHit ? "cache hit" : "cache miss") : null;
+  const labelX = (stubX + targetX) / 2;
+  const labelY = railY;
+  return (
+    <>
+      <BaseEdge
+        id={id}
+        path={path}
+        style={style}
+        markerEnd={markerEnd}
+        markerStart={markerStart}
+      />
+      {showCache ? (
+        <EdgeLabelRenderer>
+          <div
+            className={
+              cacheHit ? "resolve-edge-label hit" : "resolve-edge-label miss"
+            }
+            style={{
+              transform: `translate(-50%, -120%) translate(${labelX}px,${labelY}px)`
+            }}
+          >
+            {showCache}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
+  );
+});
+
+/** Left/right exits: go outward horizontally first, then bend (no straight stub-out). */
+const SideStubEdge = memo(function SideStubEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  style,
+  markerEnd,
+  markerStart,
+  sourcePosition,
+  targetPosition
+}: EdgeProps) {
+  const stub = 20;
+  const sourceIsLeft = sourcePosition === Position.Left;
+  const targetIsLeft = targetPosition === Position.Left;
+  const sourceStubX = sourceIsLeft ? sourceX - stub : sourceX + stub;
+  const targetStubX = targetIsLeft ? targetX - stub : targetX + stub;
+  // Mid rail between the two stubs (orthogonal: out → vertical → across → vertical → in).
+  const midY = (sourceY + targetY) / 2;
+  const path = [
+    `M ${sourceX},${sourceY}`,
+    `L ${sourceStubX},${sourceY}`,
+    `L ${sourceStubX},${midY}`,
+    `L ${targetStubX},${midY}`,
+    `L ${targetStubX},${targetY}`,
     `L ${targetX},${targetY}`
   ].join(" ");
   return (
@@ -1543,28 +1642,101 @@ const AroundTopEdge = memo(function AroundTopEdge({
 });
 
 const edgeTypes = {
-  aroundTop: AroundTopEdge
+  aroundTop: AroundTopEdge,
+  sideStub: SideStubEdge
 };
+
+
+function applyPendingMove(
+  topology: TopologySnapshot,
+  pending: { tenantId: string; shardId: string } | null
+): TopologySnapshot {
+  if (!pending) return topology;
+  // Keep prior routeVersion/tier; only relocate. Version comes from the move response.
+  return upsertTenantRoute(topology, {
+    tenantId: pending.tenantId,
+    shardId: pending.shardId
+  } as TenantRoute);
+}
+
+/** Move/insert a tenant route onto its shardId; used for optimistic UI + move response. */
+function upsertTenantRoute(
+  topology: TopologySnapshot,
+  route: TenantRoute
+): TopologySnapshot {
+  const tenantId = route.tenantId;
+  const targetShardId = route.shardId;
+  let previous: TenantRoute | null = null;
+  const stripped = topology.shards.map((entry) => {
+    const tenants = entry.tenants.filter((tenant) => {
+      if (tenant.tenantId !== tenantId) return true;
+      previous = tenant;
+      return false;
+    });
+    return {
+      ...entry,
+      tenants,
+      tenantCount: tenants.filter((tenant) => tenant.status !== "disabled").length
+    };
+  });
+  const base: TenantRoute = previous || {
+    tenantId,
+    shardId: targetShardId,
+    routeVersion: 1,
+    status: "active"
+  };
+  const nextRoute: TenantRoute = {
+    ...base,
+    ...route,
+    tenantId,
+    shardId: targetShardId,
+    // Preserve prior version when optimistic relocate omits/zeros it.
+    routeVersion:
+      route.routeVersion && route.routeVersion > 0
+        ? route.routeVersion
+        : base.routeVersion || 1,
+    tier: route.tier ?? base.tier,
+    status: route.status ?? base.status ?? "active"
+  };
+  let foundTarget = false;
+  const shards = stripped.map((entry) => {
+    if (entry.shard.id !== targetShardId) return entry;
+    foundTarget = true;
+    const tenants = [...entry.tenants, nextRoute];
+    return {
+      ...entry,
+      tenants,
+      tenantCount: tenants.filter((tenant) => tenant.status !== "disabled").length
+    };
+  });
+  if (!foundTarget) return topology;
+  return { ...topology, shards };
+}
 
 function buildGraph({
   health,
   topology,
   drafts,
   selectedTenantId,
+  resolveCacheHit,
   pulsePhase,
-  busy
+  busy,
+  pendingMove
 }: {
   health: HealthSnapshot | null;
   topology: TopologySnapshot;
   drafts: DraftTenant[];
   selectedTenantId: string | null;
+  resolveCacheHit: boolean | null;
   pulsePhase: "off" | "store" | "redis" | "api";
   busy: boolean;
+  pendingMove: { tenantId: string; shardId: string } | null;
 }): { nodes: Node<FlowNodeData>[]; edges: Edge[] } {
   const pulseStore = pulsePhase === "store";
   const pulseRedis = pulsePhase === "redis";
   const pulseApi = pulsePhase === "api";
-  const selected = topology.shards
+  const placement = applyPendingMove(topology, pendingMove);
+  const selected = placement.shards
     .flatMap((entry) => entry.tenants)
     .find(
       (route) => route.tenantId === selectedTenantId && route.status !== "disabled"
@@ -1630,7 +1802,7 @@ function buildGraph({
     }
   ];
 
-  topology.shards.forEach((entry, index) => {
+  placement.shards.forEach((entry, index) => {
     const activeTenants = entry.tenants.filter((tenant) => tenant.status !== "disabled");
     const shardDrafts = drafts.filter((draft) => draft.shardId === entry.shard.id);
     const chipCount = activeTenants.length + shardDrafts.length;
@@ -1714,23 +1886,32 @@ function buildGraph({
     });
   });
 
-  const edges: Edge[] = topology.shards.map((entry) => ({
-    id: `api-${entry.shard.id}`,
-    type: "aroundTop",
-    source: "api",
-    sourceHandle: "right",
-    target: `shard-${entry.shard.id}`,
-    animated: selectedShardId === entry.shard.id,
-    zIndex: 30,
-    style: {
-      stroke: selectedShardId === entry.shard.id ? "#59a8ff" : "#8fa3bb",
-      strokeWidth: selectedShardId === entry.shard.id ? 2.5 : 1.5
-    }
-  }));
+  const edges: Edge[] = placement.shards.map((entry) => {
+    const isSelected = selectedShardId === entry.shard.id;
+    return {
+      id: `api-${entry.shard.id}`,
+      type: "aroundTop",
+      source: "api",
+      sourceHandle: "right",
+      target: `shard-${entry.shard.id}`,
+      targetHandle: "top",
+      animated: isSelected,
+      zIndex: 30,
+      data:
+        isSelected && resolveCacheHit !== null
+          ? { cacheHit: resolveCacheHit }
+          : undefined,
+      style: {
+        stroke: isSelected ? "#59a8ff" : "#8fa3bb",
+        strokeWidth: isSelected ? 2.5 : 1.5
+      }
+    };
+  });
 
   // Sync SoT path: command write + cache-miss read (teal dotted — distinct from resolve solid).
   edges.push({
     id: "api-routestore",
+    type: "sideStub",
     source: "api",
     sourceHandle: "to-store",
     target: "routestore",
@@ -1781,6 +1962,18 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+async function fetchResolvedRoute(tenantId: string): Promise<ResolvedRouteView> {
+  const payload = await request(`/route/${encodeURIComponent(tenantId)}`);
+  if (!isRecord(payload) || !isRecord(payload.route)) {
+    throw new Error("Invalid route payload");
+  }
+  const route = payload.route;
+  return {
+    tenantId: stringValue(route.tenantId, tenantId),
+    cacheHit: Boolean(payload.cacheHit)
+  };
+}
+
 async function fetchHealth(): Promise<HealthSnapshot> {
   const payload = await request("/health");
   if (!isRecord(payload)) throw new Error("Invalid health payload");
@@ -1792,8 +1985,7 @@ async function fetchHealth(): Promise<HealthSnapshot> {
     streamKey: stringValue(payload.streamKey),
     routingPoolMax: numberValue(payload.routingPoolMax),
     shardPoolMax: numberValue(payload.shardPoolMax),
-    maxDemoShards: numberValue(payload.maxDemoShards, defaultMaxDemoShards),
-    shardPoolCount: numberValue(payload.shardPoolCount)
+    maxDemoShards: numberValue(payload.maxDemoShards, defaultMaxDemoShards)
   };
 }
 
