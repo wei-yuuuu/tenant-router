@@ -68,6 +68,36 @@ const noisyNeighbourTenants = [
 const demoEnterpriseTenant = "enterprise-acme";
 const demoTenantIds = [...noisyNeighbourTenants, demoEnterpriseTenant];
 
+type DemoStepId = 0 | 1 | 2 | 3 | 4;
+
+const demoStepCopy: Record<
+  Exclude<DemoStepId, 0>,
+  { title: string; detail: string }
+> = {
+  1: {
+    title: "1/4 Crowd free noisy neighbours",
+    detail:
+      "Create free noisy-bot-1…5 on shard-1 and annotate loadScore 0.92 (ops signal that the shard feels hot — not auto-metered usage)."
+  },
+  2: {
+    title: "2/4 Enterprise joins the crowded shard",
+    detail:
+      "Place enterprise-acme on the same hot shard. This is the noisy-neighbour problem: one lookup row still points a valuable tenant at a contended shard."
+  },
+  3: {
+    title: "3/4 Isolate with MoveTenant",
+    detail:
+      "Atomically update RouteStore: move enterprise-acme to shard-4 and annotate load 0.12. Isolation is one row change — no hash special-case."
+  },
+  4: {
+    title: "4/4 Done — isolation complete",
+    detail:
+      "Enterprise is on a quiet shard via the lookup table. Reset clears demo tenants and annotated loadScores."
+  }
+};
+
+const demoBotStaggerMs = 450;
+
 const PlacementActionsContext = createContext<PlacementActions | null>(null);
 
 function usePlacementActions(): PlacementActions {
@@ -250,6 +280,8 @@ function PlacementMap() {
     tone: "idle"
   });
   const [demoActive, setDemoActive] = useState(false);
+  const [demoStep, setDemoStep] = useState<DemoStepId>(0);
+  const demoStepRef = useRef<DemoStepId>(0);
   const syncedLabelRef = useRef<HTMLSpanElement | null>(null);
   const [canvasReady, setCanvasReady] = useState(false);
 
@@ -274,6 +306,10 @@ function PlacementMap() {
   useEffect(() => {
     draftsRef.current = drafts;
   }, [drafts]);
+
+  useEffect(() => {
+    demoStepRef.current = demoStep;
+  }, [demoStep]);
 
   useEffect(() => {
     return () => {
@@ -754,49 +790,62 @@ function PlacementMap() {
     [flashRoutePath, postJson]
   );
 
-  async function addNoisyNeighbour() {
-    setBusy(true);
-    setError("");
-    setDrafts([]);
-    selectionLockedOffRef.current = false;
-    const quiet = { pulse: false } as const;
-    try {
-      setStatus({ text: "demo: crowding shard-1 with noisy-bot-1…5", tone: "info" });
-      for (const tenantId of noisyNeighbourTenants) {
+  const showDemoStep = useCallback((step: DemoStepId) => {
+    setDemoStep(step);
+    demoStepRef.current = step;
+    if (step === 0) {
+      return;
+    }
+    const copy = demoStepCopy[step];
+    setStatus({ text: copy.title, tone: "info" });
+  }, []);
+
+  const runDemoStep = useCallback(
+    async (step: 1 | 2 | 3): Promise<void> => {
+      const quiet = { pulse: false } as const;
+      showDemoStep(step);
+      setError("");
+      setDrafts([]);
+      selectionLockedOffRef.current = false;
+
+      if (step === 1) {
+        for (const tenantId of noisyNeighbourTenants) {
+          await ensureTenant(
+            tenantId,
+            "shard-1",
+            "free",
+            "noisy neighbour",
+            quiet
+          );
+          await refresh();
+          await wait(demoBotStaggerMs);
+        }
+        await postJson("/shards", {
+          id: "shard-1",
+          name: "Local shard 1",
+          region: "local",
+          capacity: 1000,
+          loadScore: 0.92,
+          status: "active"
+        });
+        await refresh();
+        setDemoActive(true);
+        return;
+      }
+
+      if (step === 2) {
         await ensureTenant(
-          tenantId,
+          demoEnterpriseTenant,
           "shard-1",
-          "free",
-          "noisy neighbour",
+          "enterprise",
+          "noisy neighbour enterprise",
           quiet
         );
+        await refresh();
+        selectTenant(demoEnterpriseTenant);
+        return;
       }
-      await postJson("/shards", {
-        id: "shard-1",
-        name: "Local shard 1",
-        region: "local",
-        capacity: 1000,
-        loadScore: 0.92,
-        status: "active"
-      });
-      await refresh();
 
-      setStatus({ text: "demo: place enterprise-acme on crowded shard-1", tone: "info" });
-      await ensureTenant(
-        demoEnterpriseTenant,
-        "shard-1",
-        "enterprise",
-        "noisy neighbour enterprise",
-        quiet
-      );
-      await refresh();
-      selectTenant(demoEnterpriseTenant);
-      await wait(600);
-
-      setStatus({
-        text: "demo: move enterprise-acme from shard-1 to shard-4",
-        tone: "info"
-      });
       await ensureTenant(
         demoEnterpriseTenant,
         "shard-4",
@@ -815,12 +864,32 @@ function PlacementMap() {
       await refresh();
       selectTenant(demoEnterpriseTenant);
       setDemoActive(true);
-      // One path pulse for the whole demo (avoid N× ensureTenant rebuilds).
       flashRoutePath();
-      setStatus({ text: "demo: isolation complete", tone: "info" });
+    },
+    [ensureTenant, flashRoutePath, postJson, refresh, selectTenant, showDemoStep]
+  );
+
+  async function nextNoisyDemoStep() {
+    if (busy) {
+      return;
+    }
+    const current = demoStepRef.current;
+    if (current >= 4) {
+      return;
+    }
+    // After Isolate (3), Next only advances the caption to Done (4).
+    if (current === 3) {
+      showDemoStep(4);
+      return;
+    }
+    const next = (current === 0 ? 1 : current + 1) as 1 | 2 | 3;
+    setBusy(true);
+    setError("");
+    try {
+      await runDemoStep(next);
     } catch (caughtError) {
       setError(errorMessage(caughtError));
-      setStatus({ text: "demo failed", tone: "error" });
+      setStatus({ text: "demo step failed", tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -860,6 +929,7 @@ function PlacementMap() {
       await refresh();
       selectTenant(null);
       setDemoActive(false);
+      showDemoStep(0);
       setStatus({ text: "demo reset", tone: "info" });
     } catch (caughtError) {
       setError(errorMessage(caughtError));
@@ -889,21 +959,33 @@ function PlacementMap() {
           </p>
         </div>
         <div className="header-actions">
-          <div className="noisy-add">
+          <div
+            className="noisy-group"
+            role="group"
+            aria-labelledby="noisy-neighbour-label"
+            title="Lookup-table isolation: crowd free bots → enterprise joins → MoveTenant."
+          >
+            <span id="noisy-neighbour-label" className="noisy-legend">
+              Noisy neighbour
+            </span>
             <button
               className="button button-primary button-compact"
               type="button"
-              disabled={busy}
-              title="Crowd shard-1 with free noisy-bot-1…5 (annotated loadScore 0.92), place enterprise-acme there, then MoveTenant isolate it on shard-4 (loadScore 0.12)."
-              onClick={() => void addNoisyNeighbour()}
+              disabled={busy || demoStep >= 4}
+              title={
+                demoStep === 0
+                  ? "Start the isolation demo (step 1 of 4)."
+                  : "Run the next demo step."
+              }
+              onClick={() => void nextNoisyDemoStep()}
             >
-              Add a noisy neighbour
+              {demoStep === 0 ? "Start" : "Next"}
             </button>
             <button
               className="button button-secondary button-compact"
               type="button"
-              disabled={busy || !demoActive}
-              title="Disable demo tenants (noisy-bot-1…5, enterprise-acme) and clear annotated shard loadScores."
+              disabled={busy || (!demoActive && demoStep === 0)}
+              title="Disable demo tenants and clear annotated shard loadScores."
               onClick={() => void resetNoisyNeighbour()}
             >
               Reset
@@ -971,10 +1053,27 @@ function PlacementMap() {
         <div className="status-dock" aria-live="polite">
           <div
             className={`status-dock-line ${
-              error || status.tone === "error" ? "is-error" : status.tone === "info" ? "is-info" : ""
+              error || status.tone === "error"
+                ? "is-error"
+                : status.tone === "info" || demoStep > 0
+                  ? "is-info"
+                  : ""
             }`}
+            title={
+              error
+                ? error
+                : demoStep > 0
+                  ? demoStepCopy[demoStep as Exclude<DemoStepId, 0>].detail
+                  : undefined
+            }
           >
-            {error || status.text}
+            {error
+              ? error
+              : demoStep > 0
+                ? `${demoStepCopy[demoStep as Exclude<DemoStepId, 0>].title} — ${
+                    demoStepCopy[demoStep as Exclude<DemoStepId, 0>].detail
+                  }`
+                : status.text}
           </div>
           <div className="status-dock-footer">
             <div className="flow-legend">
