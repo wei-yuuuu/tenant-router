@@ -6,7 +6,8 @@ export interface HealthSnapshot {
   streamKey: string;
   routingPoolMax: number;
   shardPoolMax: number;
-  shardCount: number;
+  maxDemoShards: number;
+  shardPoolCount: number;
 }
 
 export interface TenantRoute {
@@ -64,10 +65,17 @@ export interface FlowNodeData extends Record<string, unknown> {
   routeVersion?: number;
   isDraft?: boolean;
   draftId?: string;
+  canDelete?: boolean;
+  showDelete?: boolean;
+  canProvision?: boolean;
+  provisionDisabled?: boolean;
+  provisionTitle?: string;
 }
 
 export interface PlacementActions {
   onAddTenant: (shardId: string) => void;
+  onProvisionShard: () => void;
+  onDeleteShard: (shardId: string) => void;
   onChangeTier: (tenantId: string, tier: string) => void;
   onDisableTenant: (tenantId: string) => void;
   onDraftTierChange: (draftId: string, tier: string) => void;

@@ -142,7 +142,18 @@ curl -X POST http://localhost:32768/tenants/acme/disable \
 curl -X POST http://localhost:32768/shards \
   -H 'content-type: application/json' \
   -d '{"id":"shard-5","region":"ap-northeast-1","capacity":1000,"loadScore":0.25}'
+
+# Or omit id to allocate the next free shard-N (fills gaps up to the demo cap):
+curl -X POST http://localhost:32768/shards \
+  -H 'content-type: application/json' \
+  -d '{}'
+
+curl -X DELETE http://localhost:32768/shards/shard-5
 ```
+
+Empty shards can be removed with `DELETE /shards/:id` (or the shard **×** control). At least one shard is kept. Active tenants block deletion (`SHARD_NOT_EMPTY`).
+
+The local demo caps RouteStore at **10 shards** (`MAX_DEMO_SHARDS`, default 10). The control panel **RouteStore +** control calls the same endpoint. `provisionShard` itself never needs `SHARD_N_DATABASE_URL` — it only writes RouteStore metadata. Compose ships physical Postgres pools for `shard-1`…`shard-4`; `shard-5`…`shard-10` stay metadata-only until you set `SHARD_N_DATABASE_URL` (and run a matching DB) if you also want live data queries. MoveTenant onto a metadata-only shard works; `GET /route/...` returns `SHARD_CLIENT_NOT_FOUND` until a pool is wired.
 
 These endpoints are for local control and verification. The React control panel is intentionally separate from the core package and does not become a runtime dependency of `tenant-router`. Production applications should put their own authentication, authorization, audit policy, and request validation in front of `TenantRouteCommands`.
 

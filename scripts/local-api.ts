@@ -28,6 +28,8 @@ const port = readPort(process.env.PORT ?? "3000");
 const instanceId = process.env.API_INSTANCE_ID ?? hostname();
 const routingPoolMax = readPoolMax(process.env.ROUTING_POOL_MAX ?? "10");
 const shardPoolMax = readPoolMax(process.env.SHARD_POOL_MAX ?? "10");
+/** Local demo only: RouteStore may hold at most this many shards. */
+const maxDemoShards = readPoolMax(process.env.MAX_DEMO_SHARDS ?? "10");
 const routingDatabaseUrl =
   process.env.ROUTING_DATABASE_URL ??
   "postgres://tenant_router:tenant_router_local@routing-postgres:5432/tenant_router";
@@ -88,7 +90,8 @@ const server = createServer(async (request, response) => {
         streamKey,
         routingPoolMax,
         shardPoolMax,
-        shardCount: shardPools.size
+        maxDemoShards,
+        shardPoolCount: shardPools.size
       });
       return;
     }
@@ -131,8 +134,23 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && requestUrl.pathname === "/shards") {
       const body = await readJsonBody(request);
-      const shard = await commands.provisionShard(readShardDefinition(body));
+      const shard = await provisionDemoShard(body);
       writeJson(response, 201, { shard, instanceId });
+      return;
+    }
+
+    const deleteShardMatch = /^\/shards\/([^/]+)$/.exec(requestUrl.pathname);
+    if (request.method === "DELETE" && deleteShardMatch) {
+      const shardId = decodeURIComponent(deleteShardMatch[1]);
+      const existing = await routeStore.listShards();
+      if (existing.length <= 1) {
+        throw new TenantRouterError(
+          "SHARD_DELETE_FORBIDDEN",
+          "Local demo keeps at least one shard."
+        );
+      }
+      await commands.deleteShard(shardId);
+      writeJson(response, 200, { deleted: shardId, instanceId });
       return;
     }
 
@@ -243,6 +261,8 @@ process.once("SIGTERM", () => {
 
 function createShardPools(poolMax: number): Map<string, Pool> {
   const pools = new Map<string, Pool>();
+  // Compose ships physical DBs for shard-1…4. shard-5…maxDemoShards are
+  // RouteStore metadata unless SHARD_N_DATABASE_URL is set.
   const defaultPorts = new Map([
     ["shard-1", 5541],
     ["shard-2", 5542],
@@ -250,14 +270,73 @@ function createShardPools(poolMax: number): Map<string, Pool> {
     ["shard-4", 5544]
   ]);
 
-  for (const [shardId, port] of defaultPorts) {
-    const environmentKey = `${shardId.replace("-", "_").toUpperCase()}_DATABASE_URL`;
+  for (let n = 1; n <= maxDemoShards; n += 1) {
+    const shardId = `shard-${n}`;
+    const environmentKey = `SHARD_${n}_DATABASE_URL`;
+    const fromEnv = process.env[environmentKey];
+    const port = defaultPorts.get(shardId);
+    if (!fromEnv && port === undefined) {
+      continue;
+    }
     const databaseUrl =
-      process.env[environmentKey] ??
+      fromEnv ??
       `postgres://shard:shard_local@localhost:${port}/${shardId.replace("-", "_")}`;
     pools.set(shardId, new Pool({ connectionString: databaseUrl, max: poolMax }));
   }
   return pools;
+}
+
+async function provisionDemoShard(
+  body: Record<string, unknown>
+): Promise<ShardDefinition> {
+  const existing = await routeStore.listShards();
+  const byId = new Map(existing.map((shard) => [shard.id, shard]));
+  const requestedId = optionalString(body, "id");
+  const shardId =
+    requestedId !== undefined && requestedId.length > 0
+      ? requestedId
+      : nextFreeDemoShardId(existing);
+
+  if (!byId.has(shardId) && existing.length >= maxDemoShards) {
+    throw new TenantRouterError(
+      "SHARD_LIMIT_REACHED",
+      `Local demo allows at most ${maxDemoShards} shards (RouteStore metadata).`
+    );
+  }
+
+  const definitionBody: Record<string, unknown> = { ...body, id: shardId };
+  if (optionalString(definitionBody, "name") === undefined) {
+    const n = /^shard-(\d+)$/.exec(shardId)?.[1];
+    definitionBody.name = n ? `Local shard ${n}` : `Local ${shardId}`;
+  }
+  if (optionalString(definitionBody, "region") === undefined) {
+    definitionBody.region = "local";
+  }
+  if (optionalString(definitionBody, "status") === undefined) {
+    definitionBody.status = "active";
+  }
+  if (optionalNumber(definitionBody, "capacity") === undefined) {
+    definitionBody.capacity = 1000;
+  }
+  if (optionalNumber(definitionBody, "loadScore") === undefined && !byId.has(shardId)) {
+    definitionBody.loadScore = 0;
+  }
+
+  return commands.provisionShard(readShardDefinition(definitionBody));
+}
+
+function nextFreeDemoShardId(existing: ShardDefinition[]): string {
+  const used = new Set(existing.map((shard) => shard.id));
+  for (let n = 1; n <= maxDemoShards; n += 1) {
+    const candidate = `shard-${n}`;
+    if (!used.has(candidate)) {
+      return candidate;
+    }
+  }
+  throw new TenantRouterError(
+    "SHARD_LIMIT_REACHED",
+    `Local demo allows at most ${maxDemoShards} shards (RouteStore metadata).`
+  );
 }
 
 function readPort(value: string): number {

@@ -354,6 +354,61 @@ export class PostgresRouteStore
     return result.rows.map(mapShard);
   }
 
+  async deleteShard(shardId: string): Promise<void> {
+    const id = normalizeId(shardId, "shard");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM tenant_router_routes WHERE shard_id = $1", [
+        id
+      ]);
+      await client.query("DELETE FROM tenant_router_shards WHERE shard_id = $1", [
+        id
+      ]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async persistShardDeletion(shardId: string, event: RouteEvent): Promise<void> {
+    const client = await this.pool.connect();
+    const id = normalizeId(shardId, "shard");
+    const eventId = event.eventId ?? `shard:${id}:deleted`;
+
+    try {
+      await client.query("BEGIN");
+      // Remove disabled (or any leftover) routes so FK allows shard deletion.
+      await client.query(
+        "DELETE FROM tenant_router_routes WHERE shard_id = $1",
+        [id]
+      );
+      const deleted = await client.query(
+        "DELETE FROM tenant_router_shards WHERE shard_id = $1 RETURNING shard_id",
+        [id]
+      );
+      if (deleted.rowCount === 0) {
+        throw new TenantRouterError("SHARD_NOT_FOUND", `No shard found for "${id}".`);
+      }
+      await client.query(
+        `INSERT INTO tenant_router_route_events
+          (event_id, event_type, route_version, event_json)
+         VALUES ($1, $2, $3, $4::jsonb)
+         ON CONFLICT (event_id) DO NOTHING`,
+        [eventId, event.type, null, JSON.stringify({ ...event, eventId })]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async close(): Promise<void> {
     if (this.ownsPool) {
       await this.pool.end();

@@ -30,6 +30,7 @@ export type RouteEventType =
   | "tenant.tier_changed"
   | "tenant.disabled"
   | "shard.provisioned"
+  | "shard.deleted"
   | "route.cache_invalidated"
   | (string & {});
 
@@ -91,12 +92,17 @@ export interface AtomicTenantRouteRegistry<
 
 export interface ShardRegistry {
   setShard(shard: ShardDefinition): Promise<void> | void;
+  deleteShard?(shardId: string): Promise<void> | void;
   getShard?(shardId: string): Promise<ShardDefinition | null> | ShardDefinition | null;
   listShards?(): Promise<ShardDefinition[]> | ShardDefinition[];
 }
 
 export interface AtomicShardRegistry extends ShardRegistry {
   persistShardChange(shard: ShardDefinition, event: RouteEvent): Promise<void> | void;
+  persistShardDeletion?(
+    shardId: string,
+    event: RouteEvent
+  ): Promise<void> | void;
   markRouteEventPublished?(eventId: string): Promise<void> | void;
 }
 
@@ -760,6 +766,67 @@ export class TenantRouteCommands {
     return normalizedShard;
   }
 
+  async deleteShard(shardId: string): Promise<void> {
+    const normalizedShardId = normalizeShardId(shardId);
+    await this.requireShard(normalizedShardId);
+
+    const listRoutes = this.routeRegistry.listTenantRoutes;
+    if (typeof listRoutes !== "function") {
+      throw new TenantRouterError(
+        "SHARD_DELETE_UNSUPPORTED",
+        "Deleting a shard requires routeRegistry.listTenantRoutes()."
+      );
+    }
+    const routes = await listRoutes.call(this.routeRegistry);
+    const active = routes.filter(
+      (route) =>
+        route.shardId === normalizedShardId && route.status !== "disabled"
+    );
+    if (active.length > 0) {
+      throw new TenantRouterError(
+        "SHARD_NOT_EMPTY",
+        `Cannot delete "${normalizedShardId}" while ${active.length} active tenant route(s) remain.`
+      );
+    }
+
+    const event: RouteEvent = {
+      eventId: `shard:${normalizedShardId}:deleted`,
+      type: "shard.deleted",
+      shardId: normalizedShardId,
+      occurredAt: this.now()
+    };
+    const atomicRegistry = isAtomicShardRegistry(this.shardRegistry)
+      ? this.shardRegistry
+      : null;
+
+    if (atomicRegistry?.persistShardDeletion) {
+      await atomicRegistry.persistShardDeletion(normalizedShardId, event);
+    } else {
+      const deleteShard = this.shardRegistry.deleteShard;
+      if (typeof deleteShard !== "function") {
+        throw new TenantRouterError(
+          "SHARD_DELETE_UNSUPPORTED",
+          "Shard registry does not implement deleteShard()."
+        );
+      }
+      // Drop disabled routes that still reference the shard (FK-safe demos).
+      if (typeof listRoutes === "function" && this.routeRegistry.deleteTenantRoute) {
+        const routes = await listRoutes.call(this.routeRegistry);
+        for (const route of routes) {
+          if (route.shardId === normalizedShardId) {
+            await this.routeRegistry.deleteTenantRoute(route.tenantId);
+          }
+        }
+      }
+      await deleteShard.call(this.shardRegistry, normalizedShardId);
+    }
+
+    await this.events.publish(event);
+    if (atomicRegistry?.markRouteEventPublished && event.eventId) {
+      await atomicRegistry.markRouteEventPublished(event.eventId);
+    }
+  }
+
   private async requireRoute(tenantId: string): Promise<TenantRoute> {
     const normalizedTenantId = normalizeTenantId(tenantId);
     const route = await this.routeRegistry.getTenantRoute(normalizedTenantId);
@@ -877,6 +944,10 @@ export class MemoryRouteStore<TRoute extends TenantRoute = TenantRoute>
 
   setShard(shard: ShardDefinition): void {
     this.shards.set(shard.id, shard);
+  }
+
+  deleteShard(shardId: string): void {
+    this.shards.delete(normalizeShardId(shardId));
   }
 
   getShard(shardId: string): ShardDefinition | null {

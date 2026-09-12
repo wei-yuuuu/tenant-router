@@ -40,6 +40,7 @@ import type {
 
 const pollIntervalMs = 3000;
 const fitViewOptions = { padding: 0.18, minZoom: 0.4, maxZoom: 1, duration: 0 } as const;
+const fitViewAfterChange = { padding: 0.18, minZoom: 0.35, maxZoom: 1, duration: 280 } as const;
 /** Causal write-path highlight: SoT commit → stream notify → local cache. */
 type RoutePulsePhase = "off" | "store" | "redis" | "api";
 const panOnDragButtons: number[] = [1, 2];
@@ -97,6 +98,7 @@ const demoStepCopy: Record<
 };
 
 const demoBotStaggerMs = 450;
+const defaultMaxDemoShards = 10;
 
 const PlacementActionsContext = createContext<PlacementActions | null>(null);
 
@@ -197,7 +199,8 @@ function healthEqual(a: HealthSnapshot | null, b: HealthSnapshot | null): boolea
     a.streamKey === b.streamKey &&
     a.routingPoolMax === b.routingPoolMax &&
     a.shardPoolMax === b.shardPoolMax &&
-    a.shardCount === b.shardCount
+    a.maxDemoShards === b.maxDemoShards &&
+    a.shardPoolCount === b.shardPoolCount
   );
 }
 
@@ -555,9 +558,93 @@ function PlacementMap() {
   );
 
 
+  const deleteShard = useCallback(
+    async (shardId: string) => {
+      setBusy(true);
+      setError("");
+      try {
+        await request(`/shards/${encodeURIComponent(shardId)}`, { method: "DELETE" });
+        setDrafts((current) => current.filter((draft) => draft.shardId !== shardId));
+        if (selectedTenantId) {
+          const stillThere = topologyRef.current.shards
+            .flatMap((entry) => entry.tenants)
+            .some(
+              (route) =>
+                route.tenantId === selectedTenantId && route.status !== "disabled"
+            );
+          if (!stillThere) {
+            selectTenant(null);
+          }
+        }
+        await refresh();
+        setStatus({ text: `deleted ${shardId}`, tone: "info" });
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            void fitView(fitViewAfterChange);
+          });
+        });
+      } catch (caughtError) {
+        setError(errorMessage(caughtError));
+        setStatus({ text: "delete shard failed", tone: "error" });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [fitView, refresh, selectTenant, selectedTenantId]
+  );
+
+
+  const provisionShard = useCallback(async () => {
+    if (busy) {
+      return;
+    }
+    const limit = health?.maxDemoShards ?? defaultMaxDemoShards;
+    if (topology.shards.length >= limit) {
+      setStatus({
+        text: `shard limit ${limit}/${limit}`,
+        tone: "error"
+      });
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const payload = await postJson("/shards", {});
+      const shardId =
+        isRecord(payload) && isRecord(payload.shard)
+          ? stringValue(payload.shard.id)
+          : "shard";
+      await refresh();
+      setStatus({ text: `provisioned ${shardId}`, tone: "info" });
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          void fitView(fitViewAfterChange);
+        });
+      });
+    } catch (caughtError) {
+      setError(errorMessage(caughtError));
+      setStatus({ text: "provision shard failed", tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    busy,
+    fitView,
+    health?.maxDemoShards,
+    postJson,
+    refresh,
+    topology.shards.length
+  ]);
+
   const placementActions = useMemo<PlacementActions>(
     () => ({
       onAddTenant: addDraft,
+      onProvisionShard: () => {
+        void provisionShard();
+      },
+      onDeleteShard: (shardId) => {
+        void deleteShard(shardId);
+      },
       onChangeTier: (tenantId, tier) => {
         void applyTier(tenantId, tier);
       },
@@ -578,7 +665,7 @@ function PlacementMap() {
         setDrafts((current) => current.filter((entry) => entry.draftId !== draftId));
       }
     }),
-    [addDraft, applyTier, commitDraft, disableTenant]
+    [ addDraft, applyTier, commitDraft, disableTenant, deleteShard, provisionShard ]
   );
 
   useEffect(() => {
@@ -587,7 +674,8 @@ function PlacementMap() {
       topology,
       drafts,
       selectedTenantId,
-      pulsePhase
+      pulsePhase,
+      busy
     });
     setNodes((current) => {
       const merged = mergeGraphNodes(
@@ -602,7 +690,7 @@ function PlacementMap() {
       return merged;
     });
     setEdges((current) => (edgesEqual(current, built.edges) ? current : built.edges));
-  }, [drafts, health, pulsePhase, selectedTenantId, topology]);
+  }, [busy, drafts, health, pulsePhase, selectedTenantId, topology]);
 
   useEffect(() => {
     if (loading || topology.shards.length === 0 || didFitRef.current) {
@@ -646,11 +734,12 @@ function PlacementMap() {
       topology,
       drafts,
       selectedTenantId,
-      pulsePhase
+      pulsePhase,
+      busy
     });
     setNodes((current) => mergeGraphNodes(current, built.nodes, null));
     setEdges((current) => (edgesEqual(current, built.edges) ? current : built.edges));
-  }, [drafts, health, pulsePhase, selectedTenantId, topology]);
+  }, [busy, drafts, health, pulsePhase, selectedTenantId, topology]);
 
   const onNodeDragStart: OnNodeDrag<Node<FlowNodeData>> = useCallback(
     (_event, node) => {
@@ -939,6 +1028,8 @@ function PlacementMap() {
     }
   }
 
+
+
   const totalTenants = useMemo(() => {
     return topology.shards.reduce(
       (sum, entry) =>
@@ -1005,8 +1096,13 @@ function PlacementMap() {
       <section className="how-strip" aria-label="How to use">
         <div className="how-hints">
           <span><strong>Shard +</strong> = new tenant (name + <kbd>Enter</kbd>)</span>
+          <span>
+            <strong>RouteStore +</strong> = add shard (max{" "}
+            {health?.maxDemoShards ?? defaultMaxDemoShards})
+          </span>
           <span><strong>Drag tenant</strong> = MoveTenant</span>
           <span><strong>Tenant tier</strong> = change plan</span>
+          <span><strong>Shard ×</strong> = delete empty shard</span>
           <span><strong>Tenant ×</strong> = remove</span>
         </div>
       </section>
@@ -1137,21 +1233,54 @@ const RedisNode = memo(function RedisNode({ data }: NodeProps<Node<FlowNodeData>
 });
 
 const PostgresNode = memo(function PostgresNode({ data }: NodeProps<Node<FlowNodeData>>) {
+  const { onProvisionShard } = usePlacementActions();
+  const showProvision = Boolean(data.canProvision);
   return (
     <div className={`flow-node flow-node-postgres ${data.flashing ? "is-flashing" : ""}`}>
       <Handle type="target" position={Position.Left} id="from-api" className="flow-handle" />
       <Handle type="source" position={Position.Bottom} id="to-redis" className="flow-handle" />
-      <span className="node-kicker">source of truth</span>
-      <strong>{data.title}</strong>
-      <span className="node-subtitle">{data.subtitle}</span>
-      {data.badge ? <span className="node-badge">{data.badge}</span> : null}
+      <div className="store-topline">
+        <div className="store-heading">
+          <span className="node-kicker">source of truth</span>
+          <strong>{data.title}</strong>
+          <span className="node-subtitle">{data.subtitle}</span>
+          {data.badge ? <span className="node-badge">{data.badge}</span> : null}
+        </div>
+        {showProvision ? (
+          <button
+            className="chip-add nodrag nopan nowheel"
+            type="button"
+            disabled={Boolean(data.provisionDisabled)}
+            title={
+              data.provisionTitle ||
+              "Add a shard"
+            }
+            aria-label={
+              data.provisionTitle ||
+              "Add a shard"
+            }
+            onClick={(event: MouseEvent<HTMLButtonElement>) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (data.provisionDisabled) return;
+              onProvisionShard();
+            }}
+          >
+            <span className="chip-add-glyph" aria-hidden="true">
+              +
+            </span>
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 });
 
 const ShardNode = memo(function ShardNode({ data }: NodeProps<Node<FlowNodeData>>) {
-  const { onAddTenant } = usePlacementActions();
+  const { onAddTenant, onDeleteShard } = usePlacementActions();
   const overloaded = (data.loadScore ?? 0) >= 0.8;
+  const canDelete = Boolean(data.canDelete);
+  const showDelete = Boolean(data.showDelete);
   return (
     <div
       data-shard-id={data.title}
@@ -1167,18 +1296,50 @@ const ShardNode = memo(function ShardNode({ data }: NodeProps<Node<FlowNodeData>
           <span className="node-subtitle">{data.subtitle}</span>
           {data.badge ? <span className="node-badge">{data.badge}</span> : null}
         </div>
-        <button
-          className="chip-add nodrag nopan nowheel"
-          type="button"
-          title={`Add tenant on ${data.title}`}
-          onClick={(event: MouseEvent<HTMLButtonElement>) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onAddTenant(data.title);
-          }}
-        >
-          +
-        </button>
+        <div className="shard-actions">
+          <button
+            className="chip-add nodrag nopan nowheel"
+            type="button"
+            title="Add a tenant"
+            aria-label={`Add a tenant on ${data.title}`}
+            onClick={(event: MouseEvent<HTMLButtonElement>) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onAddTenant(data.title);
+            }}
+          >
+            <span className="chip-add-glyph" aria-hidden="true">
+              +
+            </span>
+          </button>
+          {showDelete ? (
+            <button
+              className="chip-add nodrag nopan nowheel"
+              type="button"
+              disabled={!canDelete}
+              title={
+                canDelete
+                  ? "Delete this shard"
+                  : "Remove tenants first"
+              }
+              aria-label={
+                canDelete
+                  ? `Delete shard ${data.title}`
+                  : `Cannot delete ${data.title}: remove tenants first`
+              }
+              onClick={(event: MouseEvent<HTMLButtonElement>) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!canDelete) return;
+                onDeleteShard(data.title);
+              }}
+            >
+              <span className="chip-add-glyph" aria-hidden="true">
+                ×
+              </span>
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="load-row">
         <div className="load-track">
@@ -1390,13 +1551,15 @@ function buildGraph({
   topology,
   drafts,
   selectedTenantId,
-  pulsePhase
+  pulsePhase,
+  busy
 }: {
   health: HealthSnapshot | null;
   topology: TopologySnapshot;
   drafts: DraftTenant[];
   selectedTenantId: string | null;
   pulsePhase: "off" | "store" | "redis" | "api";
+  busy: boolean;
 }): { nodes: Node<FlowNodeData>[]; edges: Edge[] } {
   const pulseStore = pulsePhase === "store";
   const pulseRedis = pulsePhase === "redis";
@@ -1418,7 +1581,15 @@ function buildGraph({
         title: "RouteStore",
         subtitle: "routing-postgres · tenantId → shardId",
         badge: "postgres",
-        flashing: pulseStore
+        flashing: pulseStore,
+        canProvision: true,
+        provisionDisabled:
+          busy ||
+          topology.shards.length >= (health?.maxDemoShards ?? defaultMaxDemoShards),
+        provisionTitle:
+          topology.shards.length >= (health?.maxDemoShards ?? defaultMaxDemoShards)
+            ? `Shard limit reached (${health?.maxDemoShards ?? defaultMaxDemoShards})`
+            : "Add a shard"
       },
       draggable: false,
       selectable: false,
@@ -1483,7 +1654,12 @@ function buildGraph({
         badge: "postgres",
         loadScore: entry.shard.loadScore,
         tenantCount: activeTenants.length + shardDrafts.length,
-        highlighted: selectedShardId === entry.shard.id
+        highlighted: selectedShardId === entry.shard.id,
+        showDelete: topology.shards.length > 1,
+        canDelete:
+          topology.shards.length > 1 &&
+          activeTenants.length === 0 &&
+          shardDrafts.length === 0
       },
       style: { width: shardWidth, height, zIndex: 1 },
       zIndex: 1,
@@ -1616,7 +1792,8 @@ async function fetchHealth(): Promise<HealthSnapshot> {
     streamKey: stringValue(payload.streamKey),
     routingPoolMax: numberValue(payload.routingPoolMax),
     shardPoolMax: numberValue(payload.shardPoolMax),
-    shardCount: numberValue(payload.shardCount)
+    maxDemoShards: numberValue(payload.maxDemoShards, defaultMaxDemoShards),
+    shardPoolCount: numberValue(payload.shardPoolCount)
   };
 }
 

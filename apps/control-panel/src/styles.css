@@ -277,8 +277,12 @@ kbd {
 }
 
 .chip-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 34px;
   height: 34px;
+  padding: 0;
   border-radius: 10px;
   background: #243551;
   border: 1px solid #59a8ff;
@@ -288,8 +292,19 @@ kbd {
   flex: 0 0 auto;
 }
 
-.chip-add:hover {
+.chip-add-glyph {
+  display: block;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+
+.chip-add:hover:not(:disabled) {
   background: #2f4570;
+}
+
+.chip-add:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .flow-node {
@@ -348,12 +363,6 @@ kbd {
   background: rgba(89, 168, 255, 0.12);
   color: #9ecbff;
   font-size: 11px;
-}
-
-.shard-topline {
-  display: grid;
-  gap: 6px;
-  align-content: start;
 }
 
 .shard-id {
@@ -570,7 +579,7 @@ kbd {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  align-items: start;
+  align-items: center;
 }
 
 .react-flow__node-tenant {
@@ -801,4 +810,28 @@ kbd {
   padding: 0 10px;
   font-size: 12px;
   line-height: 1;
+}
+
+
+.shard-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+
+.store-topline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.store-heading {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
 }
