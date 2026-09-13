@@ -30,6 +30,7 @@ import {
 } from "@xyflow/react";
 
 import type {
+  ApiInstanceInfo,
   DraftTenant,
   FlowNodeData,
   HealthSnapshot,
@@ -57,6 +58,22 @@ const chipStep = chipHeight + chipGap;
 /** Header (topline + load) ends ~136px; add chipGap so top matches between-chip spacing. */
 const chipTopInset = 136 + chipGap;
 const shardBottomPad = chipGap;
+/** Top-to-bottom demo flow: RouteStore → Redis → APIs → shards (bottom row). */
+const infraX = 24;
+const apiNodeWidth = 136;
+const apiNodeGap = 28;
+const infraNodeWidth = 260;
+const shardRowX = 24;
+const shardGapX = 40;
+/** Approx rendered heights — used so RouteStore→Redis→API→shards share one gap. */
+const infraNodeHeight = 108;
+const apiNodeHeight = 92;
+/** Clear space between one layer's bottom and the next layer's top. */
+const layerGap = 56;
+const routeStoreY = 36;
+const redisY = routeStoreY + infraNodeHeight + layerGap;
+const apiRowY = redisY + infraNodeHeight + layerGap;
+const shardRowY = apiRowY + apiNodeHeight + layerGap;
 
 const emptyTopology: TopologySnapshot = {
   generatedAt: "",
@@ -131,7 +148,13 @@ function flowDataEqual(a: FlowNodeData, b: FlowNodeData): boolean {
     a.tier === b.tier &&
     a.routeVersion === b.routeVersion &&
     a.isDraft === b.isDraft &&
-    a.draftId === b.draftId
+    a.draftId === b.draftId &&
+    a.instanceId === b.instanceId &&
+    a.canDelete === b.canDelete &&
+    a.showDelete === b.showDelete &&
+    a.canProvision === b.canProvision &&
+    a.provisionDisabled === b.provisionDisabled &&
+    a.provisionTitle === b.provisionTitle
   );
 }
 
@@ -209,6 +232,32 @@ function healthEqual(a: HealthSnapshot | null, b: HealthSnapshot | null): boolea
   );
 }
 
+function apiInstancesEqual(a: ApiInstanceInfo[], b: ApiInstanceInfo[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (
+      left.instanceId !== right.instanceId ||
+      left.pid !== right.pid ||
+      left.cache !== right.cache
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function apiNodeId(instanceId: string): string {
+  return `api:${instanceId}`;
+}
+
+function shortInstanceId(instanceId: string): string {
+  if (instanceId.length <= 12) return instanceId;
+  return `${instanceId.slice(0, 8)}…`;
+}
+
 function topologyEqual(a: TopologySnapshot, b: TopologySnapshot): boolean {
   // Ignore generatedAt — API bumps it every poll even when routes are unchanged.
   if (a === b) return true;
@@ -276,6 +325,7 @@ export default function App() {
 
 function PlacementMap() {
   const [health, setHealth] = useState<HealthSnapshot | null>(null);
+  const [apiInstances, setApiInstances] = useState<ApiInstanceInfo[]>([]);
   const [topology, setTopology] = useState<TopologySnapshot>(emptyTopology);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [resolvedRoute, setResolvedRoute] = useState<ResolvedRouteView | null>(null);
@@ -308,6 +358,10 @@ function PlacementMap() {
   const resolveCacheHit =
     resolvedRoute && resolvedRoute.tenantId === selectedTenantId
       ? resolvedRoute.cacheHit
+      : null;
+  const resolveInstanceId =
+    resolvedRoute && resolvedRoute.tenantId === selectedTenantId
+      ? resolvedRoute.instanceId
       : null;
 
   const topologyRef = useRef(topology);
@@ -343,7 +397,8 @@ function PlacementMap() {
         setResolvedRoute((current) =>
           current &&
           current.tenantId === view.tenantId &&
-          current.cacheHit === view.cacheHit
+          current.cacheHit === view.cacheHit &&
+          current.instanceId === view.instanceId
             ? current
             : view
         );
@@ -395,9 +450,10 @@ function PlacementMap() {
     // Latest-wins: overlapping poll + action refresh must not apply stale payloads.
     const gen = (refreshGenRef.current += 1);
     try {
-      const [nextHealth, nextTopology] = await Promise.all([
+      const [nextHealth, nextTopology, nextInstances] = await Promise.all([
         fetchHealth(),
-        fetchTopology()
+        fetchTopology(),
+        fetchApiInstances()
       ]);
       if (gen !== refreshGenRef.current) {
         return;
@@ -405,6 +461,22 @@ function PlacementMap() {
       setHealth((current) => (healthEqual(current, nextHealth) ? current : nextHealth));
       setTopology((current) =>
         topologyEqual(current, nextTopology) ? current : nextTopology
+      );
+      const instances =
+        nextInstances.length > 0
+          ? nextInstances
+          : nextHealth.instanceId
+            ? [
+                {
+                  instanceId: nextHealth.instanceId,
+                  pid: nextHealth.pid,
+                  cache: nextHealth.cache,
+                  updatedAt: new Date().toISOString()
+                }
+              ]
+            : [];
+      setApiInstances((current) =>
+        apiInstancesEqual(current, instances) ? current : instances
       );
       // Update clock without React state — a setState here re-renders React Flow every poll.
       if (syncedLabelRef.current && nextTopology.generatedAt) {
@@ -757,10 +829,12 @@ function PlacementMap() {
   useEffect(() => {
     const built = buildGraph({
       health,
+      apiInstances,
       topology,
       drafts,
       selectedTenantId,
       resolveCacheHit,
+      resolveInstanceId,
       pulsePhase,
       busy,
       pendingMove
@@ -778,16 +852,7 @@ function PlacementMap() {
       return merged;
     });
     setEdges((current) => (edgesEqual(current, built.edges) ? current : built.edges));
-  }, [
-    busy,
-    drafts,
-    health,
-    pendingMove,
-    pulsePhase,
-    resolveCacheHit,
-    selectedTenantId,
-    topology
-  ]);
+  }, [busy, drafts, health, pendingMove, pulsePhase, resolveCacheHit, selectedTenantId, topology, apiInstances, resolveInstanceId]);
 
   useEffect(() => {
     if (loading || topology.shards.length === 0 || didFitRef.current) {
@@ -835,26 +900,19 @@ function PlacementMap() {
   const relayout = useCallback(() => {
     const built = buildGraph({
       health,
+      apiInstances,
       topology,
       drafts,
       selectedTenantId,
       resolveCacheHit,
+      resolveInstanceId,
       pulsePhase,
       busy,
       pendingMove
     });
     setNodes((current) => mergeGraphNodes(current, built.nodes, null));
     setEdges((current) => (edgesEqual(current, built.edges) ? current : built.edges));
-  }, [
-    busy,
-    drafts,
-    health,
-    pendingMove,
-    pulsePhase,
-    resolveCacheHit,
-    selectedTenantId,
-    topology
-  ]);
+  }, [busy, drafts, health, pendingMove, pulsePhase, resolveCacheHit, selectedTenantId, topology, apiInstances, resolveInstanceId]);
 
   const onNodeDragStart: OnNodeDrag<Node<FlowNodeData>> = useCallback(
     (_event, node) => {
@@ -1138,7 +1196,6 @@ function PlacementMap() {
   }
 
 
-
   const totalTenants = useMemo(() => {
     return topology.shards.reduce(
       (sum, entry) =>
@@ -1207,6 +1264,9 @@ function PlacementMap() {
           <div className="header-stat">
             <span>{totalTenants} tenants</span>
             <span>{topology.shards.length} shards</span>
+            <span>
+              {apiInstances.length > 0 ? apiInstances.length : apiOnline ? 1 : 0} APIs
+            </span>
           </div>
         </div>
       </header>
@@ -1328,13 +1388,18 @@ const ApiNode = memo(function ApiNode({ data }: NodeProps<Node<FlowNodeData>>) {
       className={`flow-node flow-node-api ${data.highlighted ? "is-highlighted" : ""} ${
         data.flashing ? "is-flashing" : ""
       }`}
+      title={
+        data.instanceId
+          ? `API instance ${data.instanceId}`
+          : "API + RouteCache"
+      }
     >
       <Handle type="target" position={Position.Top} id="top" className="flow-handle" />
       <span className="node-kicker">resolve</span>
       <strong>{data.title}</strong>
       <span className="node-subtitle">{data.subtitle}</span>
       {data.badge ? <span className="node-badge">{data.badge}</span> : null}
-      <Handle type="source" position={Position.Right} id="right" className="flow-handle" />
+      <Handle type="source" position={Position.Bottom} id="bottom" className="flow-handle" />
       <Handle type="source" position={Position.Left} id="to-store" className="flow-handle" />
     </div>
   );
@@ -1681,8 +1746,8 @@ const nodeTypes = {
   tenant: TenantNode
 };
 
-/** Route API→shard over the top rail so lines stay above shards (no node moves). */
-const AroundTopEdge = memo(function AroundTopEdge({
+/** API → shard resolve: down to a bus under the APIs, then across and into shard top. */
+const DownResolveEdge = memo(function DownResolveEdge({
   id,
   sourceX,
   sourceY,
@@ -1693,21 +1758,19 @@ const AroundTopEdge = memo(function AroundTopEdge({
   markerStart,
   data
 }: EdgeProps) {
-  const railY = 10;
-  // Stub right from the API handle first, then up to the top rail, then down into shard top-center.
-  const stubX = sourceX + 18;
+  // Same fork rhythm as DropBusEdge: branch at mid-gap.
+  const busY = sourceY + (targetY - sourceY) * 0.5;
   const path = [
     `M ${sourceX},${sourceY}`,
-    `L ${stubX},${sourceY}`,
-    `L ${stubX},${railY}`,
-    `L ${targetX},${railY}`,
+    `L ${sourceX},${busY}`,
+    `L ${targetX},${busY}`,
     `L ${targetX},${targetY}`
   ].join(" ");
   const cacheHit = data && typeof data === "object" ? data.cacheHit : undefined;
   const showCache =
     typeof cacheHit === "boolean" ? (cacheHit ? "cache hit" : "cache miss") : null;
-  const labelX = (stubX + targetX) / 2;
-  const labelY = railY;
+  const labelX = (sourceX + targetX) / 2;
+  const labelY = busY;
   return (
     <>
       <BaseEdge
@@ -1774,9 +1837,41 @@ const SideStubEdge = memo(function SideStubEdge({
   );
 });
 
+
+/** Redis → API fan-out: shared vertical trunk, then bus + drop (avoids N overlapping curves). */
+const DropBusEdge = memo(function DropBusEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  style,
+  markerEnd,
+  markerStart
+}: EdgeProps) {
+  // Branch at mid-gap so Redis→API stem matches API→shard resolve stems.
+  const busY = sourceY + (targetY - sourceY) * 0.5;
+  const path = [
+    `M ${sourceX},${sourceY}`,
+    `L ${sourceX},${busY}`,
+    `L ${targetX},${busY}`,
+    `L ${targetX},${targetY}`
+  ].join(" ");
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      style={style}
+      markerEnd={markerEnd}
+      markerStart={markerStart}
+    />
+  );
+});
+
 const edgeTypes = {
-  aroundTop: AroundTopEdge,
-  sideStub: SideStubEdge
+  downResolve: DownResolveEdge,
+  sideStub: SideStubEdge,
+  dropBus: DropBusEdge
 };
 
 
@@ -1849,19 +1944,23 @@ function upsertTenantRoute(
 
 function buildGraph({
   health,
+  apiInstances,
   topology,
   drafts,
   selectedTenantId,
   resolveCacheHit,
+  resolveInstanceId,
   pulsePhase,
   busy,
   pendingMove
 }: {
   health: HealthSnapshot | null;
+  apiInstances: ApiInstanceInfo[];
   topology: TopologySnapshot;
   drafts: DraftTenant[];
   selectedTenantId: string | null;
   resolveCacheHit: boolean | null;
+  resolveInstanceId: string | null;
   pulsePhase: "off" | "store" | "redis" | "api";
   busy: boolean;
   pendingMove: { tenantId: string; shardId: string } | null;
@@ -1877,11 +1976,43 @@ function buildGraph({
     );
   const selectedShardId = selected?.shardId ?? null;
 
+  const instances =
+    apiInstances.length > 0
+      ? apiInstances
+      : health?.instanceId
+        ? [
+            {
+              instanceId: health.instanceId,
+              pid: health.pid,
+              cache: health.cache,
+              updatedAt: ""
+            }
+          ]
+        : [];
+  // Do not follow health.instanceId — /health is load-balanced and would
+  // swap the resolve-edge source every poll. Stick to resolve answer, else
+  // the first registered replica (stable sort from /instances).
+  const activeInstanceId =
+    (resolveInstanceId &&
+    instances.some((entry) => entry.instanceId === resolveInstanceId)
+      ? resolveInstanceId
+      : null) ??
+    instances[0]?.instanceId ??
+    null;
+  const activeApiId = activeInstanceId ? apiNodeId(activeInstanceId) : "api:pending";
+  const apiCount = Math.max(1, instances.length);
+  const apiRowWidth =
+    apiCount * apiNodeWidth + Math.max(0, apiCount - 1) * apiNodeGap;
+  const infraNodeX = infraX;
+  const apiRowStartX =
+    infraX + Math.max(0, (infraNodeWidth - apiRowWidth) / 2);
+
   const nodes: Node<FlowNodeData>[] = [
     {
       id: "routestore",
       type: "postgres",
-      position: { x: 24, y: 40 },
+      position: { x: infraNodeX, y: routeStoreY },
+      style: { width: infraNodeWidth, zIndex: 2 },
       data: {
         kind: "postgres",
         title: "RouteStore",
@@ -1904,7 +2035,8 @@ function buildGraph({
     {
       id: "redis",
       type: "redis",
-      position: { x: 24, y: 200 },
+      position: { x: infraNodeX, y: redisY },
+      style: { width: infraNodeWidth, zIndex: 2 },
       data: {
         kind: "redis",
         title: "Redis Streams",
@@ -1917,24 +2049,56 @@ function buildGraph({
       draggable: false,
       selectable: false,
       zIndex: 2
-    },
-    {
-      id: "api",
+    }
+  ];
+
+  if (instances.length === 0) {
+    nodes.push({
+      id: "api:pending",
       type: "api",
-      position: { x: 24, y: 360 },
+      position: {
+        x: apiRowStartX + Math.max(0, (apiRowWidth - apiNodeWidth) / 2),
+        y: apiRowY
+      },
       data: {
         kind: "api",
         title: "API + RouteCache",
-        subtitle: health ? `API instance ${health.instanceId}` : "waiting for API",
-        badge: health?.cache || "sqlite",
-        highlighted: Boolean(selected),
+        subtitle: "waiting for API",
+        badge: "sqlite",
+        highlighted: false,
         flashing: pulseApi
       },
+      style: { width: apiNodeWidth, zIndex: 2 },
       draggable: false,
       selectable: false,
       zIndex: 2
-    }
-  ];
+    });
+  } else {
+    instances.forEach((instance, index) => {
+      const isActive = instance.instanceId === activeInstanceId;
+      nodes.push({
+        id: apiNodeId(instance.instanceId),
+        type: "api",
+        position: {
+          x: apiRowStartX + index * (apiNodeWidth + apiNodeGap),
+          y: apiRowY
+        },
+        data: {
+          kind: "api",
+          title: instances.length > 1 ? `API ${index + 1}` : "API + RouteCache",
+          subtitle: shortInstanceId(instance.instanceId),
+          badge: instance.cache || "sqlite",
+          instanceId: instance.instanceId,
+          highlighted: Boolean(selected) && isActive,
+          flashing: pulseApi && isActive
+        },
+        style: { width: apiNodeWidth, zIndex: 2 },
+        draggable: false,
+        selectable: false,
+        zIndex: 2
+      });
+    });
+  }
 
   placement.shards.forEach((entry, index) => {
     const activeTenants = entry.tenants.filter((tenant) => tenant.status !== "disabled");
@@ -1946,8 +2110,8 @@ function buildGraph({
         ? shardMinHeight
         : chipTopInset + (chipCount - 1) * chipStep + chipHeight + shardBottomPad
     );
-    const shardX = 320 + index * (shardWidth + 40);
-    const shardY = 36;
+    const shardX = shardRowX + index * (shardWidth + shardGapX);
+    const shardY = shardRowY;
 
     nodes.push({
       id: `shard-${entry.shard.id}`,
@@ -2021,17 +2185,21 @@ function buildGraph({
     });
   });
 
+  // Keep infra edges under nodes (high zIndex was drawing lines through API cards).
+  const infraZ = 0;
+  const resolveZ = 1;
+
   const edges: Edge[] = placement.shards.map((entry) => {
     const isSelected = selectedShardId === entry.shard.id;
     return {
       id: `api-${entry.shard.id}`,
-      type: "aroundTop",
-      source: "api",
-      sourceHandle: "right",
+      type: "downResolve",
+      source: activeApiId,
+      sourceHandle: "bottom",
       target: `shard-${entry.shard.id}`,
       targetHandle: "top",
       animated: isSelected,
-      zIndex: 30,
+      zIndex: resolveZ,
       data:
         isSelected && resolveCacheHit !== null
           ? { cacheHit: resolveCacheHit }
@@ -2043,19 +2211,25 @@ function buildGraph({
     };
   });
 
-  // Sync SoT path: command write + cache-miss read (teal dotted — distinct from resolve solid).
+  const apiIds =
+    instances.length > 0
+      ? instances.map((entry) => apiNodeId(entry.instanceId))
+      : ["api:pending"];
+
+  // One SoT link from the active API → RouteStore.
   edges.push({
     id: "api-routestore",
     type: "sideStub",
-    source: "api",
+    source: activeApiId,
     sourceHandle: "to-store",
     target: "routestore",
     targetHandle: "from-api",
     animated: pulseStore,
+    zIndex: infraZ,
     style: {
       stroke: pulseStore ? "#f0b429" : "#6db3a0",
       strokeWidth: pulseStore ? 2.5 : 1.5,
-      strokeDasharray: "2 4"
+      strokeDasharray: "10 8"
     }
   });
 
@@ -2067,27 +2241,33 @@ function buildGraph({
     target: "redis",
     targetHandle: "top",
     animated: pulseStore || pulseRedis,
+    zIndex: infraZ,
     style: {
-      stroke: pulseStore || pulseRedis ? "#f0b429" : "#4a5563",
-      strokeWidth: pulseStore || pulseRedis ? 2.5 : 1.25,
-      strokeDasharray: "5 4"
+      stroke: pulseStore || pulseRedis ? "#f0b429" : "#7b8ea6",
+      strokeWidth: pulseStore || pulseRedis ? 2.5 : 1.5,
+      strokeDasharray: "10 8"
     }
   });
 
-  // Fan-out: Redis → API RouteCache invalidate/refresh.
-  edges.push({
-    id: "redis-api",
-    source: "redis",
-    sourceHandle: "bottom",
-    target: "api",
-    targetHandle: "top",
-    animated: pulseRedis || pulseApi,
-    style: {
-      stroke: pulseRedis || pulseApi ? "#f0b429" : "#4a5563",
-      strokeWidth: pulseRedis || pulseApi ? 2.5 : 1.25,
-      strokeDasharray: "5 4"
-    }
-  });
+  // Fan-out: Redis → each API via a shared drop-bus (one trunk, then branch).
+  for (const apiId of apiIds) {
+    const isActive = apiId === activeApiId;
+    edges.push({
+      id: `redis-${apiId}`,
+      type: "dropBus",
+      source: "redis",
+      sourceHandle: "bottom",
+      target: apiId,
+      targetHandle: "top",
+      animated: (pulseRedis || pulseApi) && isActive,
+      zIndex: infraZ,
+      style: {
+        stroke: (pulseRedis || pulseApi) && isActive ? "#f0b429" : "#7b8ea6",
+        strokeWidth: (pulseRedis || pulseApi) && isActive ? 2.5 : 1.5,
+        strokeDasharray: "10 8"
+      }
+    });
+  }
 
   return { nodes, edges };
 }
@@ -2106,7 +2286,8 @@ async function fetchResolvedRoute(tenantId: string): Promise<ResolvedRouteView> 
   const route = payload.route;
   return {
     tenantId: stringValue(route.tenantId, tenantId),
-    cacheHit: Boolean(payload.cacheHit)
+    cacheHit: Boolean(payload.cacheHit),
+    instanceId: stringValue(payload.instanceId)
   };
 }
 
@@ -2123,6 +2304,26 @@ async function fetchHealth(): Promise<HealthSnapshot> {
     shardPoolMax: numberValue(payload.shardPoolMax),
     maxDemoShards: numberValue(payload.maxDemoShards, defaultMaxDemoShards)
   };
+}
+
+async function fetchApiInstances(): Promise<ApiInstanceInfo[]> {
+  const payload = await request("/instances");
+  if (!isRecord(payload) || !Array.isArray(payload.instances)) {
+    return [];
+  }
+  const instances: ApiInstanceInfo[] = [];
+  for (const entry of payload.instances) {
+    if (!isRecord(entry)) continue;
+    const instanceId = stringValue(entry.instanceId);
+    if (!instanceId) continue;
+    instances.push({
+      instanceId,
+      pid: numberValue(entry.pid),
+      cache: stringValue(entry.cache, "sqlite"),
+      updatedAt: stringValue(entry.updatedAt)
+    });
+  }
+  return instances;
 }
 
 async function fetchTopology(): Promise<TopologySnapshot> {

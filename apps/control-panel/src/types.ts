@@ -9,6 +9,14 @@ export interface HealthSnapshot {
   maxDemoShards: number;
 }
 
+/** Live API replica from GET /instances (Redis registry). */
+export interface ApiInstanceInfo {
+  instanceId: string;
+  pid: number;
+  cache: string;
+  updatedAt: string;
+}
+
 export interface TenantRoute {
   tenantId: string;
   shardId: string;
@@ -72,6 +80,7 @@ export interface FlowNodeData extends Record<string, unknown> {
   canProvision?: boolean;
   provisionDisabled?: boolean;
   provisionTitle?: string;
+  instanceId?: string;
 }
 
 export interface PlacementActions {
@@ -90,4 +99,5 @@ export interface PlacementActions {
 export interface ResolvedRouteView {
   tenantId: string;
   cacheHit: boolean;
+  instanceId: string;
 }

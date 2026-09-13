@@ -316,12 +316,21 @@ kbd {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
 }
 
-.flow-node-api,
 .flow-node-redis,
 .flow-node-postgres {
-  width: 260px;
+  width: 100%;
+  box-sizing: border-box;
   display: grid;
   gap: 6px;
+  padding: 12px;
+}
+
+.flow-node-api {
+  width: 100%;
+  box-sizing: border-box;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
 }
 
 .flow-node-api .node-subtitle,

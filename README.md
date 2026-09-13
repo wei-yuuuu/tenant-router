@@ -44,6 +44,8 @@ To simulate three API pods, scale the same runner. Each container gets its own S
 docker compose up -d --scale api=3
 # Scale API replicas freely — demo QPS is shared via Redis (no DEMO_API_REPLICAS):
 # docker compose up -d --scale api=3
+# Each replica registers in Redis; GET /instances lists them so the control panel
+# can draw one API node per instance (resolve edge follows the answering replica).
 docker compose port --index 1 api 3000
 docker compose port --index 2 api 3000
 docker compose port --index 3 api 3000

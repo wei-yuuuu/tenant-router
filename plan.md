@@ -312,6 +312,7 @@ Status key: **done** / **partial** / **not started** / **won't do (for now)**.
 - [x] Multiple shard DBs in Compose; resolve → pool when wired
 - [x] Demo `loadScore` from real `POST /tenants/:id/query` traffic (Redis shared QPS window / `DEMO_LOAD_QPS_CAP`; may exceed 1.0; never blocks). Metadata-only shards stay 0 qps / 503 on query
 - [x] Demo load = interactive/real API queries (not background chatter / pg_stat)
+- [x] Control panel draws one API node per live replica (`GET /instances` via Redis registry); resolve edge uses answering `instanceId`
 - [ ] Automatic noisy detection / policy engine — **not started**
 - [ ] Metadata-only provisioned shards have no pool until `SHARD_N_DATABASE_URL` — intentional for demo
 

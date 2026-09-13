@@ -65,7 +65,10 @@ const commands = createTenantRouteCommands({
   events
 });
 const shardPools = createShardPools(shardPoolMax);
-const tenantClientResolver = createTenantShardClientResolver({
+const tenantClientResolver = createTenantShardClientResolver<
+  import("../src/index.ts").TenantRoute,
+  Pool
+>({
   routeResolver: router,
   shardClients: {
     getShardClient(shardId) {
@@ -100,6 +103,14 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "GET" && requestUrl.pathname === "/topology") {
       writeJson(response, 200, await withDemoLoadScores(await topology.getTopologySnapshot()));
+      return;
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/instances") {
+      writeJson(response, 200, {
+        instances: await listApiInstances(),
+        instanceId
+      });
       return;
     }
 
@@ -211,10 +222,9 @@ const server = createServer(async (request, response) => {
         Math.max(1, Math.floor(optionalNumber(body, "count") ?? 1))
       );
       const resolved = await tenantClientResolver.resolve(tenantId);
-      const pool = resolved.client as Pool;
       // Real shard traffic for the demo gauge (not synthetic background chatter).
       for (let i = 0; i < count; i += 1) {
-        await pool.query("SELECT 1");
+        await resolved.client.query("SELECT 1");
       }
       await recordDemoShardHits(resolved.route.shardId, count);
       writeJson(response, 200, {
@@ -276,6 +286,74 @@ demoRedis.on("error", (error) => {
   console.error(`[${instanceId}] demo redis error`, error);
 });
 await demoRedis.connect();
+
+const apiInstanceKeyPrefix =
+  process.env.API_INSTANCE_KEY_PREFIX ?? "tenant-router:api-instance";
+const apiInstanceTtlSec = readPositiveInt(
+  "API_INSTANCE_TTL_SEC",
+  process.env.API_INSTANCE_TTL_SEC ?? "15",
+  5
+);
+let apiInstanceHeartbeat: ReturnType<typeof setInterval> | undefined;
+
+function apiInstanceRedisKey(id: string): string {
+  return `${apiInstanceKeyPrefix}:${id}`;
+}
+
+async function publishApiInstance(): Promise<void> {
+  const payload = JSON.stringify({
+    instanceId,
+    pid: process.pid,
+    cache: "sqlite",
+    updatedAt: new Date().toISOString()
+  });
+  await demoRedis.set(apiInstanceRedisKey(instanceId), payload, {
+    EX: apiInstanceTtlSec
+  });
+}
+
+async function listApiInstances(): Promise<
+  Array<{ instanceId: string; pid: number; cache: string; updatedAt: string }>
+> {
+  const keys: string[] = [];
+  for await (const key of demoRedis.scanIterator({
+    MATCH: `${apiInstanceKeyPrefix}:*`,
+    COUNT: 32
+  })) {
+    keys.push(typeof key === "string" ? key : String(key));
+  }
+  if (keys.length === 0) {
+    return [];
+  }
+  const values = await demoRedis.mGet(keys);
+  const instances: Array<{
+    instanceId: string;
+    pid: number;
+    cache: string;
+    updatedAt: string;
+  }> = [];
+  for (const value of values) {
+    if (!value) continue;
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      const id = typeof parsed.instanceId === "string" ? parsed.instanceId : "";
+      if (!id) continue;
+      instances.push({
+        instanceId: id,
+        pid: typeof parsed.pid === "number" ? parsed.pid : 0,
+        cache: typeof parsed.cache === "string" ? parsed.cache : "sqlite",
+        updatedAt:
+          typeof parsed.updatedAt === "string"
+            ? parsed.updatedAt
+            : new Date().toISOString()
+      });
+    } catch {
+      // skip bad payloads
+    }
+  }
+  instances.sort((left, right) => left.instanceId.localeCompare(right.instanceId));
+  return instances;
+}
 
 function demoHitsKey(shardId: string, epochSec: number): string {
   return `${demoHitsKeyPrefix}:${shardId}:${epochSec}`;
@@ -353,6 +431,12 @@ async function withDemoLoadScores(
 }
 
 await listen(server, port);
+await publishApiInstance();
+apiInstanceHeartbeat = setInterval(() => {
+  void publishApiInstance().catch((error) => {
+    console.error(`[${instanceId}] api instance heartbeat failed`, error);
+  });
+}, Math.max(3_000, Math.floor((apiInstanceTtlSec * 1000) / 3)));
 console.log(
   JSON.stringify({
     ok: true,
@@ -373,6 +457,15 @@ async function close(): Promise<void> {
     return;
   }
   closing = true;
+  if (apiInstanceHeartbeat) {
+    clearInterval(apiInstanceHeartbeat);
+    apiInstanceHeartbeat = undefined;
+  }
+  try {
+    await demoRedis.del(apiInstanceRedisKey(instanceId));
+  } catch {
+    // ignore registry cleanup errors
+  }
 
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
