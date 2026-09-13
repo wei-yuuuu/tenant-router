@@ -1401,6 +1401,7 @@ const ApiNode = memo(function ApiNode({ data }: NodeProps<Node<FlowNodeData>>) {
       {data.badge ? <span className="node-badge">{data.badge}</span> : null}
       <Handle type="source" position={Position.Bottom} id="bottom" className="flow-handle" />
       <Handle type="source" position={Position.Left} id="to-store" className="flow-handle" />
+      <Handle type="source" position={Position.Right} id="to-store-right" className="flow-handle" />
     </div>
   );
 });
@@ -1424,6 +1425,7 @@ const PostgresNode = memo(function PostgresNode({ data }: NodeProps<Node<FlowNod
   return (
     <div className={`flow-node flow-node-postgres ${data.flashing ? "is-flashing" : ""}`}>
       <Handle type="target" position={Position.Left} id="from-api" className="flow-handle" />
+      <Handle type="target" position={Position.Right} id="from-api-right" className="flow-handle" />
       <Handle type="source" position={Position.Bottom} id="to-redis" className="flow-handle" />
       <div className="store-topline">
         <div className="store-heading">
@@ -1811,19 +1813,19 @@ const SideStubEdge = memo(function SideStubEdge({
   sourcePosition,
   targetPosition
 }: EdgeProps) {
-  const stub = 20;
+  const stub = 28;
   const sourceIsLeft = sourcePosition === Position.Left;
   const targetIsLeft = targetPosition === Position.Left;
-  const sourceStubX = sourceIsLeft ? sourceX - stub : sourceX + stub;
-  const targetStubX = targetIsLeft ? targetX - stub : targetX + stub;
-  // Mid rail between the two stubs (orthogonal: out → vertical → across → vertical → in).
+  // Keep a single outer rail so left/right SoT skirts Redis instead of crossing it.
+  const railX = sourceIsLeft
+    ? Math.min(sourceX, targetX) - stub
+    : Math.max(sourceX, targetX) + stub;
   const midY = (sourceY + targetY) / 2;
   const path = [
     `M ${sourceX},${sourceY}`,
-    `L ${sourceStubX},${sourceY}`,
-    `L ${sourceStubX},${midY}`,
-    `L ${targetStubX},${midY}`,
-    `L ${targetStubX},${targetY}`,
+    `L ${railX},${sourceY}`,
+    `L ${railX},${midY}`,
+    `L ${railX},${targetY}`,
     `L ${targetX},${targetY}`
   ].join(" ");
   return (
@@ -2216,14 +2218,22 @@ function buildGraph({
       ? instances.map((entry) => apiNodeId(entry.instanceId))
       : ["api:pending"];
 
-  // One SoT link from the active API → RouteStore.
+  // SoT: pick left/right outer path from active API vs RouteStore so we skirt Redis.
+  const activeApiIndex = Math.max(
+    0,
+    instances.findIndex((entry) => apiNodeId(entry.instanceId) === activeApiId)
+  );
+  const activeApiCenterX =
+    apiRowStartX + activeApiIndex * (apiNodeWidth + apiNodeGap) + apiNodeWidth / 2;
+  const routeStoreCenterX = infraNodeX + infraNodeWidth / 2;
+  const sotOnRight = activeApiCenterX > routeStoreCenterX + 8;
   edges.push({
     id: "api-routestore",
     type: "sideStub",
     source: activeApiId,
-    sourceHandle: "to-store",
+    sourceHandle: sotOnRight ? "to-store-right" : "to-store",
     target: "routestore",
-    targetHandle: "from-api",
+    targetHandle: sotOnRight ? "from-api-right" : "from-api",
     animated: pulseStore,
     zIndex: infraZ,
     style: {
