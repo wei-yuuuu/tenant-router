@@ -26,6 +26,8 @@ export interface ShardDefinition {
   region?: string;
   capacity?: number;
   loadScore?: number;
+  /** Demo-only: real query QPS from local API (Redis window). */
+  demoQps?: number;
 }
 
 export interface ShardTopology {
@@ -58,6 +60,7 @@ export interface FlowNodeData extends Record<string, unknown> {
   flashing?: boolean;
   highlighted?: boolean;
   loadScore?: number;
+  demoQps?: number;
   tenantCount?: number;
   tenantId?: string;
   tier?: string;
@@ -77,6 +80,7 @@ export interface PlacementActions {
   onDeleteShard: (shardId: string) => void;
   onChangeTier: (tenantId: string, tier: string) => void;
   onDisableTenant: (tenantId: string) => void;
+  onQueryTenant: (tenantId: string, count?: number) => void;
   onDraftTierChange: (draftId: string, tier: string) => void;
   onCommitDraft: (draftId: string, name: string) => void;
   onCancelDraft: (draftId: string) => void;

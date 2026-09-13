@@ -42,6 +42,8 @@ To simulate three API pods, scale the same runner. Each container gets its own S
 
 ```sh
 docker compose up -d --scale api=3
+# Scale API replicas freely — demo QPS is shared via Redis (no DEMO_API_REPLICAS):
+# docker compose up -d --scale api=3
 docker compose port --index 1 api 3000
 docker compose port --index 2 api 3000
 docker compose port --index 3 api 3000
@@ -345,7 +347,7 @@ console.log(shardLoad?.tenantCount, shardLoad?.loadScore);
 console.log(snapshot.shards, snapshot.unassignedRoutes);
 ```
 
-`tenantCount` counts current tenant-to-shard mappings. `loadScore` is the persisted operator metric from the shard definition; it is not calculated automatically and does not override `TenantRoute.shardId`.
+`tenantCount` counts current tenant-to-shard mappings. In the **local demo API**, topology `loadScore` is overwritten from **real** tenant query traffic: `POST /tenants/:id/query` runs shard `SELECT 1`s and records hits in Redis; QPS is hits over `DEMO_QPS_WINDOW_SEC` (default 5) ÷ `DEMO_LOAD_QPS_CAP` (default 100 = 100%; may exceed 1.0; never blocks placement). The control panel DB-icon query control (and the noisy-neighbour demo bursts) drive that traffic. Shared Redis counters keep `--scale api=N` gauges consistent. The library itself still treats persisted shard `loadScore` as an optional ops field and does not auto-route on it.
 
 ## Route Commands
 

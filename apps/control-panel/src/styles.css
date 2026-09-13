@@ -389,6 +389,11 @@ kbd {
   background: linear-gradient(90deg, #3dd68c, #f0b429, #ff6b7a);
 }
 
+.load-fill.is-over-cap {
+  background: linear-gradient(90deg, #ff6b7a, #ff8b97);
+}
+
+
 .load-label {
   color: var(--muted);
   font-size: 11px;
@@ -396,10 +401,10 @@ kbd {
 
 .tenant-chip {
   display: grid;
-  gap: 4px;
+  gap: 8px;
   width: 100%;
   text-align: left;
-  padding: 10px 28px 10px 12px;
+  padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid #2b3a4d;
   background: #0d1520;
@@ -454,22 +459,54 @@ kbd {
   text-decoration: line-through;
 }
 
+.chip-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .chip-name {
+  flex: 1;
+  min-width: 0;
   font-weight: 600;
   font-size: 13px;
+  line-height: 22px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-top-end {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .chip-meta {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   color: var(--muted);
   font-size: 11px;
+  min-height: 22px;
 }
 
-.chip-meta code {
+.chip-version {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 22px;
   color: #c7dbff;
+  min-width: 22px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.chip-version.is-new {
+  font-family: inherit;
+  color: var(--muted);
 }
 
 .flow-handle {
@@ -530,8 +567,9 @@ kbd {
 
 .how-strip {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px 16px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  gap: 16px;
   align-items: center;
   padding: 8px 12px;
   border: 1px solid var(--panel-border);
@@ -634,12 +672,12 @@ kbd {
   color: var(--enterprise);
 }
 
-.chip-close {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 20px;
-  height: 20px;
+.chip-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   border-radius: 6px;
   border: 1px solid #2b3a4d;
   background: #182232;
@@ -648,6 +686,12 @@ kbd {
   font-size: 14px;
   cursor: pointer;
   padding: 0;
+  flex-shrink: 0;
+}
+
+.chip-icon-btn:hover {
+  border-color: #59a8ff;
+  color: #d7e8ff;
 }
 
 .chip-close:hover {
@@ -655,13 +699,24 @@ kbd {
   color: #ffd0d5;
 }
 
+.chip-query-btn:hover {
+  border-color: #3dd68c;
+  color: #b8f5d4;
+}
+
+.chip-icon {
+  display: block;
+}
+
 .chip-name-input {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  width: auto;
   border: 1px dashed #3d5270;
   background: #0a1017;
   color: var(--text);
   border-radius: 8px;
-  padding: 6px 8px;
+  padding: 4px 8px;
   font-size: 13px;
   font-weight: 600;
 }
@@ -678,15 +733,6 @@ kbd {
 
 .main-stage-full {
   grid-template-columns: 1fr;
-}
-
-.how-strip {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: nowrap;
-  flex-shrink: 0;
-  padding: 8px 12px;
 }
 
 .how-hints {
@@ -852,7 +898,6 @@ kbd {
 }
 
 
-
 .resolve-edge-label {
   position: absolute;
   pointer-events: none;
@@ -873,3 +918,4 @@ kbd {
 .resolve-edge-label.miss {
   color: #ff6b7a;
 }
+

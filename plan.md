@@ -310,8 +310,9 @@ Status key: **done** / **partial** / **not started** / **won't do (for now)**.
 
 ### 5. Shard simulation example — **partial**
 - [x] Multiple shard DBs in Compose; resolve → pool when wired
-- [x] Demo `loadScore` auto from active tenant count / soft cap 5 (local topology); not real DB QPS
-- [ ] Synthetic per-tenant load / automatic noisy detection — **not started**
+- [x] Demo `loadScore` from real `POST /tenants/:id/query` traffic (Redis shared QPS window / `DEMO_LOAD_QPS_CAP`; may exceed 1.0; never blocks). Metadata-only shards stay 0 qps / 503 on query
+- [x] Demo load = interactive/real API queries (not background chatter / pg_stat)
+- [ ] Automatic noisy detection / policy engine — **not started**
 - [ ] Metadata-only provisioned shards have no pool until `SHARD_N_DATABASE_URL` — intentional for demo
 
 ### 6. Interactive demo UI — **partial**

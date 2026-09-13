@@ -26,6 +26,10 @@ services:
       REDIS_URL: redis://redis:6379
       REDIS_STREAM_KEY: tenant-router:route-events
       SHARD_POOL_MAX: ${SHARD_POOL_MAX:-10}
+      # loadScore = real API query QPS / this (100 ⇒ 100%; may exceed; never blocks)
+      DEMO_LOAD_QPS_CAP: ${DEMO_LOAD_QPS_CAP:-100}
+      # Sliding window for demo QPS (Redis hit counters shared across API replicas)
+      DEMO_QPS_WINDOW_SEC: ${DEMO_QPS_WINDOW_SEC:-5}
       SHARD_1_DATABASE_URL: postgres://shard:shard_local@shard-1:5432/shard_1
       SHARD_2_DATABASE_URL: postgres://shard:shard_local@shard-2:5432/shard_2
       SHARD_3_DATABASE_URL: postgres://shard:shard_local@shard-3:5432/shard_3

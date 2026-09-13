@@ -22,6 +22,8 @@ import type {
 } from "../src/index.ts";
 import { createSqliteRouteCache } from "../src/node.ts";
 import { createPostgresRouteStore } from "../src/postgres.ts";
+import { createClient } from "redis";
+
 import { createRedisRouteEvents } from "../src/redis.ts";
 
 const port = readPort(process.env.PORT ?? "3000");
@@ -60,8 +62,7 @@ const topology = createRouteTopologyReader({
 const commands = createTenantRouteCommands({
   routeRegistry: routeStore,
   shardRegistry: routeStore,
-  events,
-  // Visible cutover window for the placement demo (lookup already updated).
+  events
 });
 const shardPools = createShardPools(shardPoolMax);
 const tenantClientResolver = createTenantShardClientResolver({
@@ -98,7 +99,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/topology") {
-      writeJson(response, 200, withDemoLoadScores(await topology.getTopologySnapshot()));
+      writeJson(response, 200, await withDemoLoadScores(await topology.getTopologySnapshot()));
       return;
     }
 
@@ -201,6 +202,31 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    const queryMatch = /^\/tenants\/([^/]+)\/query$/.exec(requestUrl.pathname);
+    if (request.method === "POST" && queryMatch) {
+      const tenantId = decodeURIComponent(queryMatch[1]);
+      const body = await readJsonBody(request);
+      const count = Math.min(
+        50,
+        Math.max(1, Math.floor(optionalNumber(body, "count") ?? 1))
+      );
+      const resolved = await tenantClientResolver.resolve(tenantId);
+      const pool = resolved.client as Pool;
+      // Real shard traffic for the demo gauge (not synthetic background chatter).
+      for (let i = 0; i < count; i += 1) {
+        await pool.query("SELECT 1");
+      }
+      await recordDemoShardHits(resolved.route.shardId, count);
+      writeJson(response, 200, {
+        tenantId,
+        shardId: resolved.route.shardId,
+        queries: count,
+        instanceId,
+        route: resolved.route
+      });
+      return;
+    }
+
     writeJson(response, 404, { error: "NOT_FOUND", instanceId });
   } catch (error) {
     if (error instanceof TenantRouterError) {
@@ -236,6 +262,96 @@ const server = createServer(async (request, response) => {
   }
 });
 
+/**
+ * Demo load = real tenant query rate (POST /tenants/:id/query → shard SELECT).
+ * Hits are stored in Redis so every API replica reports the same QPS.
+ * Soft cap DEMO_LOAD_QPS_CAP (default 100) ⇒ 100%; may exceed 1.0. Never blocks create/move.
+ */
+const demoLoadQpsCap = readPositiveInt("DEMO_LOAD_QPS_CAP", process.env.DEMO_LOAD_QPS_CAP ?? "100", 1);
+const demoQpsWindowSec = readPositiveInt("DEMO_QPS_WINDOW_SEC", process.env.DEMO_QPS_WINDOW_SEC ?? "5", 2);
+const demoHitsKeyPrefix = process.env.DEMO_HITS_KEY_PREFIX ?? "tenant-router:demo-hits";
+
+const demoRedis = createClient({ url: redisUrl });
+demoRedis.on("error", (error) => {
+  console.error(`[${instanceId}] demo redis error`, error);
+});
+await demoRedis.connect();
+
+function demoHitsKey(shardId: string, epochSec: number): string {
+  return `${demoHitsKeyPrefix}:${shardId}:${epochSec}`;
+}
+
+async function recordDemoShardHits(shardId: string, count: number): Promise<void> {
+  if (!Number.isFinite(count) || count <= 0) {
+    return;
+  }
+  const epoch = Math.floor(Date.now() / 1000);
+  const key = demoHitsKey(shardId, epoch);
+  const next = await demoRedis.incrBy(key, Math.floor(count));
+  if (next === Math.floor(count)) {
+    // First write in this second — expire after the window (+skew).
+    await demoRedis.expire(key, demoQpsWindowSec + 2);
+  }
+}
+
+async function readDemoShardQps(shardId: string): Promise<number> {
+  const now = Math.floor(Date.now() / 1000);
+  const keys = [];
+  for (let i = 0; i < demoQpsWindowSec; i += 1) {
+    keys.push(demoHitsKey(shardId, now - i));
+  }
+  const values = await demoRedis.mGet(keys);
+  let hits = 0;
+  for (const value of values) {
+    const n = Number(value ?? 0);
+    if (Number.isFinite(n)) {
+      hits += n;
+    }
+  }
+  return hits / demoQpsWindowSec;
+}
+
+async function withDemoLoadScores(
+  snapshot: Awaited<ReturnType<typeof topology.getTopologySnapshot>>
+) {
+  const qpsByShard = new Map<string, number>();
+  await Promise.all(
+    snapshot.shards.map(async (entry) => {
+      const shardId = entry.shard.id;
+      if (!shardPools.has(shardId)) {
+        qpsByShard.set(shardId, 0);
+        return;
+      }
+      try {
+        qpsByShard.set(shardId, await readDemoShardQps(shardId));
+      } catch (error) {
+        console.error(`[${instanceId}] demo qps read failed for ${shardId}`, error);
+        qpsByShard.set(shardId, 0);
+      }
+    })
+  );
+
+  return {
+    ...snapshot,
+    shards: snapshot.shards.map((entry) => {
+      const active = entry.tenants.filter((tenant) => tenant.status !== "disabled");
+      const shardId = entry.shard.id;
+      const qps = qpsByShard.get(shardId) ?? 0;
+      const loadScore = qps / demoLoadQpsCap;
+      const demoQps = Math.round(qps * 10) / 10;
+      return {
+        ...entry,
+        tenantCount: active.length,
+        shard: {
+          ...entry.shard,
+          loadScore,
+          demoQps
+        }
+      };
+    })
+  };
+}
+
 await listen(server, port);
 console.log(
   JSON.stringify({
@@ -245,7 +361,9 @@ console.log(
     sqlitePath,
     streamKey,
     routingPoolMax,
-    shardPoolMax
+    shardPoolMax,
+    demoLoadQpsCap,
+    demoQpsWindowSec
   })
 );
 
@@ -261,6 +379,11 @@ async function close(): Promise<void> {
   });
   await router.close();
   await events.close();
+  try {
+    await demoRedis.quit();
+  } catch {
+    // ignore quit races during shutdown
+  }
   await Promise.all([...shardPools.values()].map((pool) => pool.end()));
   await routeStore.close();
   cache.close();
@@ -273,26 +396,6 @@ process.once("SIGTERM", () => {
   void close().then(() => process.exit(0));
 });
 
-
-/** Demo load: active tenants / soft cap (5 ⇒ 100%). Not real DB QPS. */
-const demoLoadSoftCap = 5;
-
-function withDemoLoadScores(snapshot: Awaited<ReturnType<typeof topology.getTopologySnapshot>>) {
-  return {
-    ...snapshot,
-    shards: snapshot.shards.map((entry) => {
-      const active = entry.tenants.filter((tenant) => tenant.status !== "disabled").length;
-      return {
-        ...entry,
-        tenantCount: active,
-        shard: {
-          ...entry.shard,
-          loadScore: Math.min(1, active / demoLoadSoftCap)
-        }
-      };
-    })
-  };
-}
 
 function createShardPools(poolMax: number): Map<string, Pool> {
   const pools = new Map<string, Pool>();
@@ -380,6 +483,14 @@ function readPort(value: string): number {
     throw new Error(`Invalid PORT: ${value}`);
   }
   return parsed;
+}
+
+function readPositiveInt(label: string, value: string, minimum = 1): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < minimum) {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
+  return Math.floor(parsed);
 }
 
 function readPoolMax(value: string): number {

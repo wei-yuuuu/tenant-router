@@ -50,10 +50,13 @@ const reactFlowProOptions = { hideAttribution: true } as const;
 const shardWidth = 280;
 const shardMinHeight = 220;
 const tenantNodeWidth = 240;
-const chipTopInset = 136;
-const chipStep = 72;
-const chipHeight = 60;
-const shardBottomPad = 18;
+/** Vertical gap above first chip, between chips, and below last chip. */
+const chipGap = 18;
+const chipHeight = 78;
+const chipStep = chipHeight + chipGap;
+/** Header (topline + load) ends ~136px; add chipGap so top matches between-chip spacing. */
+const chipTopInset = 136 + chipGap;
+const shardBottomPad = chipGap;
 
 const emptyTopology: TopologySnapshot = {
   generatedAt: "",
@@ -80,7 +83,7 @@ const demoStepCopy: Record<
   1: {
     title: "1/4 Crowd free noisy neighbours",
     detail:
-      "Create free noisy-bot-1…5 on shard-1. Load rises with active tenant count (demo: 5 tenants ⇒ 100%)."
+      "Create free noisy-bot-1…5 on shard-1, then burst real queries so shard load rises. Use the DB icon on a tenant to query again."
   },
   2: {
     title: "2/4 Enterprise joins the crowded shard",
@@ -95,7 +98,7 @@ const demoStepCopy: Record<
   4: {
     title: "4/4 Done — isolation complete",
     detail:
-      "Enterprise is on a quieter shard via the lookup table. Reset clears demo tenants; load follows remaining counts."
+      "Enterprise is on a quieter shard via the lookup table. Reset clears demo tenants; load follows real query traffic."
   }
 };
 
@@ -122,6 +125,7 @@ function flowDataEqual(a: FlowNodeData, b: FlowNodeData): boolean {
     a.flashing === b.flashing &&
     a.highlighted === b.highlighted &&
     a.loadScore === b.loadScore &&
+    a.demoQps === b.demoQps &&
     a.tenantCount === b.tenantCount &&
     a.tenantId === b.tenantId &&
     a.tier === b.tier &&
@@ -286,6 +290,8 @@ function PlacementMap() {
   const [pulsePhase, setPulsePhase] = useState<RoutePulsePhase>("off");
   const pulseTimersRef = useRef<number[]>([]);
   const [loading, setLoading] = useState(true);
+  /** Health/poll reachability only — not command/validation errors. */
+  const [apiOnline, setApiOnline] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<{ text: string; tone: "idle" | "info" | "error" }>({
     text: "Ready.",
@@ -406,7 +412,8 @@ function PlacementMap() {
           nextTopology.generatedAt
         ).toLocaleTimeString();
       }
-      setError("");
+      // Keep operator errors visible; actions clear error when they start.
+      setApiOnline(true);
 
       const demoPresent = nextTopology.shards.some((entry) =>
         entry.tenants.some(
@@ -419,7 +426,8 @@ function PlacementMap() {
       if (gen !== refreshGenRef.current) {
         return;
       }
-      setError(errorMessage(caughtError));
+      // Badge only — do not overwrite create/move validation errors in the dock.
+      setApiOnline(false);
     } finally {
       if (gen === refreshGenRef.current) {
         setLoading(false);
@@ -478,8 +486,9 @@ function PlacementMap() {
         void refresh();
         return true;
       } catch (caughtError) {
-        setError(errorMessage(caughtError));
-        setStatus({ text: "move failed", tone: "error" });
+        const reason = errorMessage(caughtError);
+        setError(reason);
+        setStatus({ text: `move failed — ${reason}`, tone: "error" });
         void refresh();
         return false;
       }
@@ -505,8 +514,9 @@ function PlacementMap() {
           });
         }
       } catch (caughtError) {
-        setError(errorMessage(caughtError));
-        setStatus({ text: "tier change failed", tone: "error" });
+        const reason = errorMessage(caughtError);
+        setError(reason);
+        setStatus({ text: `tier change failed — ${reason}`, tone: "error" });
       }
     },
     [flashRoutePath, postJson, refresh]
@@ -527,8 +537,9 @@ function PlacementMap() {
           selectTenant(null);
         }
       } catch (caughtError) {
-        setError(errorMessage(caughtError));
-        setStatus({ text: "remove failed", tone: "error" });
+        const reason = errorMessage(caughtError);
+        setError(reason);
+        setStatus({ text: `remove failed — ${reason}`, tone: "error" });
       }
     },
     [flashRoutePath, postJson, refresh, selectTenant, selectedTenantId]
@@ -546,25 +557,42 @@ function PlacementMap() {
         setDrafts((current) => current.filter((entry) => entry.draftId !== draftId));
         return;
       }
-      const exists = topologyRef.current.shards.some((entry) =>
-        entry.tenants.some(
-          (route) => route.tenantId === tenantId && route.status !== "disabled"
-        )
-      );
-      if (exists) {
+      const existing = topologyRef.current.shards
+        .flatMap((entry) => entry.tenants)
+        .find((route) => route.tenantId === tenantId);
+      if (existing && existing.status !== "disabled") {
         setError(`Tenant "${tenantId}" already exists.`);
+        setStatus({
+          text: `create failed — Tenant "${tenantId}" already exists.`,
+          tone: "error"
+        });
         return;
       }
 
       setError("");
       setStatus({ text: `creating tenant ${tenantId}…`, tone: "info" });
       try {
-        const payload = await postJson("/tenants", {
-          tenantId,
-          shardId: draft.shardId,
-          tier: draft.tier || "free",
-          reason: "created from placement map"
-        });
+        // Disabled rows still live in RouteStore — createTenant would 400 ALREADY_EXISTS.
+        // Move (same or other shard) rewrites status=active, matching ensureTenant.
+        const payload =
+          existing?.status === "disabled"
+            ? await postJson(`/tenants/${encodeURIComponent(tenantId)}/move`, {
+                shardId: draft.shardId,
+                tier: draft.tier || "free",
+                reason: "recreated from placement map"
+              })
+            : await postJson("/tenants", {
+                tenantId,
+                shardId: draft.shardId,
+                tier: draft.tier || "free",
+                reason: "created from placement map"
+              });
+        if (existing?.status === "disabled" && (existing.tier || "free") !== (draft.tier || "free")) {
+          await postJson(`/tenants/${encodeURIComponent(tenantId)}/tier`, {
+            tier: draft.tier || "free",
+            reason: "recreated from placement map"
+          });
+        }
         setDrafts((current) => current.filter((entry) => entry.draftId !== draftId));
         flashRoutePath();
         await refresh();
@@ -577,8 +605,9 @@ function PlacementMap() {
           });
         }
       } catch (caughtError) {
-        setError(errorMessage(caughtError));
-        setStatus({ text: "create failed", tone: "error" });
+        const reason = errorMessage(caughtError);
+        setError(reason);
+        setStatus({ text: `create failed — ${reason}`, tone: "error" });
       }
     },
     [flashRoutePath, postJson, refresh, selectTenant]
@@ -611,8 +640,9 @@ function PlacementMap() {
           });
         });
       } catch (caughtError) {
-        setError(errorMessage(caughtError));
-        setStatus({ text: "delete shard failed", tone: "error" });
+        const reason = errorMessage(caughtError);
+        setError(reason);
+        setStatus({ text: `delete shard failed — ${reason}`, tone: "error" });
       } finally {
         setBusy(false);
       }
@@ -649,8 +679,9 @@ function PlacementMap() {
         });
       });
     } catch (caughtError) {
-      setError(errorMessage(caughtError));
-      setStatus({ text: "provision shard failed", tone: "error" });
+      const reason = errorMessage(caughtError);
+      setError(reason);
+      setStatus({ text: `provision shard failed — ${reason}`, tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -662,6 +693,31 @@ function PlacementMap() {
     refresh,
     topology.shards.length
   ]);
+
+  const queryTenant = useCallback(
+    async (tenantId: string, count = 1) => {
+      setError("");
+      setStatus({
+        text: count > 1 ? `query ${tenantId} ×${count}…` : `query ${tenantId}…`,
+        tone: "info"
+      });
+      try {
+        await postJson(`/tenants/${encodeURIComponent(tenantId)}/query`, {
+          count
+        });
+        await refresh();
+        setStatus({
+          text: count > 1 ? `queried ${tenantId} ×${count}` : `queried ${tenantId}`,
+          tone: "info"
+        });
+      } catch (caughtError) {
+        const reason = errorMessage(caughtError);
+        setError(reason);
+        setStatus({ text: `query failed — ${reason}`, tone: "error" });
+      }
+    },
+    [postJson, refresh]
+  );
 
   const placementActions = useMemo<PlacementActions>(
     () => ({
@@ -678,6 +734,9 @@ function PlacementMap() {
       onDisableTenant: (tenantId) => {
         void disableTenant(tenantId);
       },
+      onQueryTenant: (tenantId, count) => {
+        void queryTenant(tenantId, count);
+      },
       onDraftTierChange: (draftId, tier) => {
         setDrafts((current) =>
           current.map((entry) =>
@@ -692,7 +751,7 @@ function PlacementMap() {
         setDrafts((current) => current.filter((entry) => entry.draftId !== draftId));
       }
     }),
-    [ addDraft, applyTier, commitDraft, disableTenant, deleteShard, provisionShard ]
+    [addDraft, applyTier, commitDraft, disableTenant, deleteShard, provisionShard, queryTenant]
   );
 
   useEffect(() => {
@@ -968,8 +1027,18 @@ function PlacementMap() {
           await refresh();
           await wait(demoBotStaggerMs);
         }
+        // Drive real query traffic so shard-1 load rises (no background chatter).
+        for (const tenantId of noisyNeighbourTenants) {
+          await postJson(`/tenants/${encodeURIComponent(tenantId)}/query`, {
+            count: 20
+          });
+        }
         await refresh();
         setDemoActive(true);
+        setStatus({
+          text: "1/4 noisy bots querying shard-1 — use the DB icon on a tenant for more load",
+          tone: "info"
+        });
         return;
       }
 
@@ -981,6 +1050,11 @@ function PlacementMap() {
           "noisy neighbour enterprise",
           quiet
         );
+        for (const tenantId of noisyNeighbourTenants) {
+          await postJson(`/tenants/${encodeURIComponent(tenantId)}/query`, {
+            count: 15
+          });
+        }
         await refresh();
         selectTenant(demoEnterpriseTenant);
         return;
@@ -1020,8 +1094,9 @@ function PlacementMap() {
     try {
       await runDemoStep(next);
     } catch (caughtError) {
-      setError(errorMessage(caughtError));
-      setStatus({ text: "demo step failed", tone: "error" });
+      const reason = errorMessage(caughtError);
+      setError(reason);
+      setStatus({ text: `demo step failed — ${reason}`, tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -1054,8 +1129,9 @@ function PlacementMap() {
       showDemoStep(0);
       setStatus({ text: "demo reset", tone: "info" });
     } catch (caughtError) {
-      setError(errorMessage(caughtError));
-      setStatus({ text: "demo reset failed", tone: "error" });
+      const reason = errorMessage(caughtError);
+      setError(reason);
+      setStatus({ text: `demo reset failed — ${reason}`, tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -1115,9 +1191,18 @@ function PlacementMap() {
               Reset
             </button>
           </div>
-          <div className={`connection-state ${error ? "connection-state-error" : ""}`}>
+          <div
+            className={`connection-state ${apiOnline ? "" : "connection-state-error"}`}
+            title={
+              apiOnline
+                ? "API health/topology poll OK"
+                : "API unreachable (health/topology poll failed)"
+            }
+          >
             <span className="connection-dot" />
-            <span>{error ? "API unavailable" : "Live"}</span>
+            <span>
+              {apiOnline ? "Live" : loading ? "Connecting…" : "API offline"}
+            </span>
           </div>
           <div className="header-stat">
             <span>{totalTenants} tenants</span>
@@ -1380,15 +1465,18 @@ const ShardNode = memo(function ShardNode({ data }: NodeProps<Node<FlowNodeData>
       <div className="load-row">
         <div className="load-track">
           <div
-            className="load-fill"
-            style={{ width: `${Math.min(100, Math.round((data.loadScore ?? 0) * 100))}%` }}
+            className={`load-fill${(data.loadScore ?? 0) > 1 ? " is-over-cap" : ""}`}
+            style={{
+              width: `${Math.min(100, Math.round((data.loadScore ?? 0) * 100))}%`
+            }}
           />
         </div>
         <span className="load-label">
           {data.tenantCount ?? 0} tenants
           {data.loadScore !== undefined
-            ? ` · load ${Math.min(100, Math.round((data.loadScore ?? 0) * 100))}%`
+            ? ` · load ${Math.round((data.loadScore ?? 0) * 100)}%`
             : ""}
+          {data.demoQps !== undefined ? ` · ${data.demoQps} qps` : ""}
         </span>
       </div>
     </div>
@@ -1442,57 +1530,100 @@ const TenantNode = memo(function TenantNode({ data }: NodeProps<Node<FlowNodeDat
         data.selected ? "is-selected" : ""
       } ${isDraft ? "is-draft" : ""}`}
     >
-      <button
-        type="button"
-        className="chip-close nodrag nopan nowheel"
-        title={isDraft ? "Discard" : "Remove"}
-        onPointerDown={(event) => event.stopPropagation()}
-        onMouseDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          if (isDraft) {
-            actions.onCancelDraft(String(data.draftId || ""));
-          } else {
-            actions.onDisableTenant(tenantId);
-          }
-        }}
-      >
-        ×
-      </button>
-
-      {isDraft ? (
-        <input
-          ref={inputRef}
-          className="chip-name-input nodrag nopan nowheel"
-          data-draft-id={data.draftId}
-          value={localName}
-          placeholder="tenant name"
-          autoComplete="off"
-          spellCheck={false}
-          onPointerDown={(event) => event.stopPropagation()}
-          onMouseDown={(event) => event.stopPropagation()}
-          onChange={(event) => setLocalName(event.target.value)}
-          onCompositionStart={() => {
-            composingRef.current = true;
-          }}
-          onCompositionEnd={(event) => {
-            composingRef.current = false;
-            setLocalName(event.currentTarget.value);
-          }}
-          onKeyDown={onNameKeyDown}
-          onBlur={() => {
-            if (composingRef.current) {
-              return;
-            }
-            if (!localName.trim()) {
-              actions.onCancelDraft(String(data.draftId || ""));
-            }
-          }}
-        />
-      ) : (
-        <span className="chip-name">{tenantId}</span>
-      )}
+      <div className="chip-top">
+        {isDraft ? (
+          <input
+            ref={inputRef}
+            className="chip-name-input nodrag nopan nowheel"
+            data-draft-id={data.draftId}
+            value={localName}
+            placeholder="tenant name"
+            autoComplete="off"
+            spellCheck={false}
+            onPointerDown={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onChange={(event) => setLocalName(event.target.value)}
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
+            onCompositionEnd={(event) => {
+              composingRef.current = false;
+              setLocalName(event.currentTarget.value);
+            }}
+            onKeyDown={onNameKeyDown}
+            onBlur={() => {
+              if (composingRef.current) {
+                return;
+              }
+              if (!localName.trim()) {
+                actions.onCancelDraft(String(data.draftId || ""));
+              }
+            }}
+          />
+        ) : (
+          <span className="chip-name" title={tenantId}>
+            {tenantId}
+          </span>
+        )}
+        <div className="chip-top-end nodrag nopan nowheel">
+          {!isDraft ? (
+            <button
+              type="button"
+              className="chip-icon-btn chip-query-btn"
+              title={`Query shard DB (tenants/${tenantId}/query)`}
+              aria-label={`Query shard DB for ${tenantId}`}
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                actions.onQueryTenant(tenantId, 1);
+              }}
+            >
+              <svg
+                className="chip-icon"
+                viewBox="0 0 16 16"
+                width="14"
+                height="14"
+                aria-hidden="true"
+              >
+                <ellipse cx="8" cy="3.5" rx="5.5" ry="2.2" fill="none" stroke="currentColor" strokeWidth="1.25" />
+                <path
+                  d="M2.5 3.5v9c0 1.2 2.5 2.2 5.5 2.2s5.5-1 5.5-2.2v-9"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                />
+                <path
+                  d="M2.5 8c0 1.2 2.5 2.2 5.5 2.2s5.5-1 5.5-2.2"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                />
+              </svg>
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="chip-icon-btn chip-close"
+            title={isDraft ? "Discard" : "Remove"}
+            aria-label={isDraft ? "Discard draft" : `Remove ${tenantId}`}
+            onPointerDown={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (isDraft) {
+                actions.onCancelDraft(String(data.draftId || ""));
+              } else {
+                actions.onDisableTenant(tenantId);
+              }
+            }}
+          >
+            ×
+          </button>
+        </div>
+      </div>
 
       <span className="chip-meta">
         {isDraft ? (
@@ -1532,13 +1663,15 @@ const TenantNode = memo(function TenantNode({ data }: NodeProps<Node<FlowNodeDat
             <option value="enterprise">enterprise</option>
           </select>
         )}
-        {!isDraft ? <code>v{String(data.routeVersion ?? 1)}</code> : <span>new</span>}
+        {!isDraft ? (
+          <code className="chip-version">v{String(data.routeVersion ?? 1)}</code>
+        ) : (
+          <span className="chip-version is-new">new</span>
+        )}
       </span>
     </div>
   );
 });
-
-
 
 const nodeTypes = {
   api: ApiNode,
@@ -1655,8 +1788,9 @@ function applyPendingMove(
   // Keep prior routeVersion/tier; only relocate. Version comes from the move response.
   return upsertTenantRoute(topology, {
     tenantId: pending.tenantId,
-    shardId: pending.shardId
-  } as TenantRoute);
+    shardId: pending.shardId,
+    routeVersion: 0
+  });
 }
 
 /** Move/insert a tenant route onto its shardId; used for optimistic UI + move response. */
@@ -1825,6 +1959,7 @@ function buildGraph({
         subtitle: entry.shard.name || entry.shard.region || "data shard",
         badge: "postgres",
         loadScore: entry.shard.loadScore,
+        demoQps: entry.shard.demoQps,
         tenantCount: activeTenants.length + shardDrafts.length,
         highlighted: selectedShardId === entry.shard.id,
         showDelete: topology.shards.length > 1,
@@ -1962,6 +2097,7 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+
 async function fetchResolvedRoute(tenantId: string): Promise<ResolvedRouteView> {
   const payload = await request(`/route/${encodeURIComponent(tenantId)}`);
   if (!isRecord(payload) || !isRecord(payload.route)) {
@@ -2024,7 +2160,8 @@ function readShardTopology(value: unknown): ShardTopology | null {
       status: optionalString(shard.status),
       region: optionalString(shard.region),
       capacity: optionalNumber(shard.capacity),
-      loadScore: optionalNumber(shard.loadScore)
+      loadScore: optionalNumber(shard.loadScore),
+      demoQps: optionalNumber(shard.demoQps)
     },
     tenants,
     tenantCount: numberValue(value.tenantCount, tenants.length)
@@ -2064,12 +2201,16 @@ async function request(path: string, options?: RequestInit): Promise<unknown> {
     }
   }
   if (!response.ok) {
-    const message =
+    const code =
+      isRecord(payload) && typeof payload.error === "string" ? payload.error : "";
+    const detail =
       isRecord(payload) && typeof payload.message === "string"
         ? payload.message
-        : isRecord(payload) && typeof payload.error === "string"
-          ? payload.error
-          : `Request failed (${response.status})`;
+        : "";
+    const message =
+      code && detail
+        ? `${code}: ${detail}`
+        : detail || code || `Request failed (${response.status})`;
     throw new Error(message);
   }
   return payload;
