@@ -11,6 +11,7 @@ The core package defines the contracts used by its first-class stack:
 The supported production shape is SQLite for the local cache, Redis for route events, and PostgreSQL for the route source of truth. The in-memory adapters remain useful for tests and single-process development.
 
 See [the database schema reference](docs/database.md) for every persisted SQLite cache field and ready-to-run inspection queries.
+See the [architecture and roadmap notes](docs/plan.md) for the design context behind the library and demo.
 
 ## Local Stack
 
@@ -241,7 +242,9 @@ The React control panel is a thin client of `TenantRouteCommands`; it is not a s
 
 ## Demo Walkthrough
 
-Watch the complete local walkthrough: [demo.mp4](docs/demo.mp4) (about 78 seconds). It uses a clean isolated Compose data set and covers the current control-panel surface:
+Watch the complete local walkthrough (about 78 seconds). It uses a clean isolated Compose data set and covers the current control-panel surface:
+
+<video src="https://github.com/user-attachments/assets/9a838dc7-a300-4e25-8358-f4eeab272463" controls></video>
 
 1. The top-down map shows RouteStore, Redis Streams, three API instances, and four PostgreSQL shards.
 2. Add `portfolio-acme` to a shard, change its tier, and select it to inspect route resolution and cache state.
@@ -252,7 +255,7 @@ Watch the complete local walkthrough: [demo.mp4](docs/demo.mp4) (about 78 second
 
 The load gauge is an observability aid for this demo, not an automatic placement policy. A live business-data pool exists for `shard-1` through `shard-4` in Compose.
 
-The MP4 is committed as a portable download. GitHub's inline player requires uploading the same file through the GitHub Markdown editor as a hosted asset; the generated `github.com/user-attachments/assets/...` URL can then replace this file link without adding another codec copy to the repository.
+If the inline player is unavailable in a particular client, [open the hosted demo video directly](https://github.com/user-attachments/assets/9a838dc7-a300-4e25-8358-f4eeab272463).
 
 ## Core Usage
 
