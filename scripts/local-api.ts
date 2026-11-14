@@ -316,11 +316,17 @@ async function listApiInstances(): Promise<
   Array<{ instanceId: string; pid: number; cache: string; updatedAt: string }>
 > {
   const keys: string[] = [];
-  for await (const key of demoRedis.scanIterator({
+  for await (const batch of demoRedis.scanIterator({
     MATCH: `${apiInstanceKeyPrefix}:*`,
     COUNT: 32
   })) {
-    keys.push(typeof key === "string" ? key : String(key));
+    if (Array.isArray(batch)) {
+      for (const key of batch) {
+        keys.push(typeof key === "string" ? key : String(key));
+      }
+    } else {
+      keys.push(typeof batch === "string" ? batch : String(batch));
+    }
   }
   if (keys.length === 0) {
     return [];

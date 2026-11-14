@@ -25,7 +25,7 @@ The repository includes a Docker Compose stack for the first-class local depende
 Start everything with:
 
 ```sh
-docker compose up -d
+docker compose up -d --build --scale api=3
 docker compose ps
 npm run smoke:local
 ```
@@ -33,7 +33,9 @@ npm run smoke:local
 Open the control panel at `http://localhost:5173/`. The API runner publishes container port `3000` to a random host port for direct inspection:
 
 ```sh
-open http://localhost:5173/
+open http://localhost:5173/              # macOS
+# Windows PowerShell: start http://localhost:5173/
+# Linux desktop: xdg-open http://localhost:5173/
 curl "http://$(docker compose port api 3000)/health"
 curl "http://$(docker compose port api 3000)/route/acme"
 ```
@@ -42,8 +44,6 @@ To simulate three API pods, scale the same runner. Each container gets its own S
 
 ```sh
 docker compose up -d --scale api=3
-# Scale API replicas freely — demo QPS is shared via Redis (no DEMO_API_REPLICAS):
-# docker compose up -d --scale api=3
 # Each replica registers in Redis; GET /instances lists them so the control panel
 # can draw one API node per instance (resolve edge follows the answering replica).
 docker compose port --index 1 api 3000
@@ -122,7 +122,7 @@ curl http://localhost:32768/route/acme
 
 ### Use the React Control Panel
 
-Open `http://localhost:5173/`. The panel is a separate Compose service from `apps/control-panel` (bind-mounted for Vite HMR; edit `apps/control-panel/src` and refresh happens automatically), with React Flow rendering the command and data paths. It reads `/health` and `/topology` through its same-origin `/api` proxy and sends commands to the API service. It can create a tenant route, move a tenant, change its tier, disable it, and register shard metadata.
+Open `http://localhost:5173/`. The panel is a separate Compose service from `apps/control-panel` (bind-mounted for Vite HMR; edit `apps/control-panel/src` and refresh happens automatically), with React Flow rendering the command and data paths. It reads `/health` and `/topology` through its same-origin `/api` proxy and sends commands to the API service. It can create a tenant route, move a tenant, change its tier, disable/recreate it, query a real shard, and provision/delete shard metadata.
 
 The command endpoints are intentionally small and map directly to `TenantRouteCommands`:
 
@@ -159,7 +159,13 @@ Empty shards can be removed with `DELETE /shards/:id` (or the shard **×** contr
 
 The local demo caps RouteStore at **10 shards** (`MAX_DEMO_SHARDS`, default 10). The control panel **RouteStore +** control calls the same endpoint. `provisionShard` itself never needs `SHARD_N_DATABASE_URL` — it only writes RouteStore metadata. Compose ships physical Postgres pools for `shard-1`…`shard-4`; `shard-5`…`shard-10` stay metadata-only until you set `SHARD_N_DATABASE_URL` (and run a matching DB) if you also want live data queries. MoveTenant onto a metadata-only shard works; `GET /route/...` returns `SHARD_CLIENT_NOT_FOUND` until a pool is wired.
 
-These endpoints are for local control and verification. The React control panel is intentionally separate from the core package and does not become a runtime dependency of `tenant-router`. Production applications should put their own authentication, authorization, audit policy, and request validation in front of `TenantRouteCommands`.
+> [!NOTE]
+> Provisioning a shard in this local demo registers routing metadata; it does not create a PostgreSQL database or business-data pool. A metadata-only shard can resolve in RouteStore, but live tenant queries require a matching `SHARD_N_DATABASE_URL` and database.
+
+These endpoints are for local control and verification. The React control panel is intentionally separate from the core package and does not become a runtime dependency of `tenant-router`.
+
+> [!WARNING]
+> The local command API is intentionally unauthenticated. Production applications must put application-owned authentication, authorization, audit policy, and request validation in front of `TenantRouteCommands`.
 
 ### Inspect PostgreSQL
 
@@ -223,17 +229,30 @@ flowchart TB
     Shard4["Shard 4"]
   end
 
-  Store -. "route and shard metadata" .-> Shard1
-  Store -. "route and shard metadata" .-> Shard2
-  Store -. "route and shard metadata" .-> Shard3
-  Store -. "route and shard metadata" .-> Shard4
   API -->|"resolve shard client"| ClientResolver["TenantShardClientResolver"]
   ClientResolver -->|"query selected shard (example)"| Shard2
 
-  Legend["Solid arrow: runtime data flow<br/>Dashed arrow: stored metadata relationship"]
+  Legend["Solid arrow: runtime data flow<br/>Dashed arrow: route-event or cache relationship"]
 ```
 
+`PostgresRouteStore` only connects to the routing PostgreSQL database. It reads and writes `tenant_router_routes`, `tenant_router_shards`, and the route-event outbox; it does not hold business-shard pools or execute tenant SQL. The API service owns one application pool per configured shard, and `TenantShardClientResolver` selects that already-open pool after `TenantShardRouter` resolves the tenant route.
+
 The React control panel is a thin client of `TenantRouteCommands`; it is not a separate route store. This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts for its SQLite, Redis, and PostgreSQL adapters.
+
+## Demo Walkthrough
+
+Watch the complete local walkthrough: [demo.mp4](docs/demo.mp4) (about 78 seconds). It uses a clean isolated Compose data set and covers the current control-panel surface:
+
+1. The top-down map shows RouteStore, Redis Streams, three API instances, and four PostgreSQL shards.
+2. Add `portfolio-acme` to a shard, change its tier, and select it to inspect route resolution and cache state.
+3. Use the database icon to issue real `SELECT 1` queries through the resolved shard pool; the Redis-backed QPS gauge updates on the map.
+4. Drag the tenant to another shard to run `MoveTenant`, then disable and recreate the route.
+5. Run the four-step noisy-neighbour demo: free tenants crowd a shard, enterprise joins, then `MoveTenant` isolates it on a quieter shard.
+6. Reset the demo tenants, provision a metadata-only shard with `RouteStore +`, and delete it with `Shard ×`.
+
+The load gauge is an observability aid for this demo, not an automatic placement policy. A live business-data pool exists for `shard-1` through `shard-4` in Compose.
+
+The MP4 is committed as a portable download. GitHub's inline player requires uploading the same file through the GitHub Markdown editor as a hosted asset; the generated `github.com/user-attachments/assets/...` URL can then replace this file link without adding another codec copy to the repository.
 
 ## Core Usage
 

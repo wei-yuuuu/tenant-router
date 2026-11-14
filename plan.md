@@ -132,7 +132,7 @@ Redis roles:
 
 - Redis Streams for command-side events and fan-out to API nodes.
 - Redis hashes or JSON-like keys for a shared read model if needed.
-- API process memory as the fastest local route cache.
+- SQLite per-API route cache for restart-safe local lookups; in-memory adapters remain test fakes.
 - Optional Redis pub/sub for low-latency cache invalidation, with Streams kept as the durable event log.
 
 ## Tenant Tier Model
@@ -238,7 +238,7 @@ Local infra for examples:
 
 - Docker Compose for Redis and database shards
 - PostgreSQL containers as realistic shard targets
-- SQLite can be used for a smaller first demo, but Postgres is better for shard semantics
+- SQLite is the first-class per-API route cache; PostgreSQL remains the routing metadata store and realistic shard target
 
 ## Data Model Draft
 
