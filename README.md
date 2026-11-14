@@ -13,6 +13,34 @@ The supported production shape is SQLite for the local cache, Redis for route ev
 See [the database schema reference](docs/database.md) for every persisted SQLite cache field and ready-to-run inspection queries.
 See the [architecture and roadmap notes](docs/plan.md) for the design context behind the library and demo.
 
+## See It In Action
+
+Watch the complete local walkthrough (about 78 seconds). It uses a clean isolated Compose data set and covers the current control-panel surface:
+
+<video src="https://github.com/user-attachments/assets/a7a3fea9-739a-48ad-b4f8-dd17b4427262" controls></video>
+
+The video cards follow the same command sequence:
+
+| Time | Demo action | API path |
+| --- | --- | --- |
+| `0:00` | Load the topology and API instance views | `GET /health`, `GET /topology`, `GET /instances` |
+| `0:04` | Create `portfolio-acme` | `POST /tenants` |
+| `0:09` | Change its tier | `POST /tenants/:id/tier` |
+| `0:15` | Execute a real `SELECT 1` through the selected shard pool | `POST /tenants/:id/query` |
+| `0:22` | Drag the tenant from `shard-2` to `shard-3` | `POST /tenants/:id/move` |
+| `0:28` | Disable, then recreate the route | `POST /tenants/:id/disable`, then `POST /tenants/:id/move` |
+| `0:34` | Create noisy free tenants and generate real queries | `POST /tenants`, `POST /tenants/:id/query` |
+| `0:41` | Place the enterprise tenant on the crowded shard | `POST /tenants`, `POST /tenants/:id/query` |
+| `0:48` | Isolate the enterprise tenant on `shard-4` | `POST /tenants/:id/move` |
+| `0:55` | Show the completed isolation | UI state after the move |
+| `1:00` | Reset noisy-neighbour demo tenants | `POST /tenants/:id/disable` |
+| `1:06` | Provision metadata for `shard-5` | `POST /shards` |
+| `1:12` | Delete the empty `shard-5` metadata | `DELETE /shards/:id` |
+
+The load gauge is an observability aid for this demo, not an automatic placement policy. A live business-data pool exists for `shard-1` through `shard-4` in Compose.
+
+If the inline player is unavailable in a particular client, [open the hosted demo video directly](https://github.com/user-attachments/assets/a7a3fea9-739a-48ad-b4f8-dd17b4427262).
+
 ## Local Stack
 
 The repository includes a Docker Compose stack for the first-class local dependencies:
@@ -239,23 +267,6 @@ flowchart TB
 `PostgresRouteStore` only connects to the routing PostgreSQL database. It reads and writes `tenant_router_routes`, `tenant_router_shards`, and the route-event outbox; it does not hold business-shard pools or execute tenant SQL. The API service owns one application pool per configured shard, and `TenantShardClientResolver` selects that already-open pool after `TenantShardRouter` resolves the tenant route.
 
 The React control panel is a thin client of `TenantRouteCommands`; it is not a separate route store. This is the first complete library slice: the core router owns lookup flow, cache behavior, event-driven invalidation, and the contracts for its SQLite, Redis, and PostgreSQL adapters.
-
-## Demo Walkthrough
-
-Watch the complete local walkthrough (about 78 seconds). It uses a clean isolated Compose data set and covers the current control-panel surface:
-
-<video src="https://github.com/user-attachments/assets/9a838dc7-a300-4e25-8358-f4eeab272463" controls></video>
-
-1. The top-down map shows RouteStore, Redis Streams, three API instances, and four PostgreSQL shards.
-2. Add `portfolio-acme` to a shard, change its tier, and select it to inspect route resolution and cache state.
-3. Use the database icon to issue real `SELECT 1` queries through the resolved shard pool; the Redis-backed QPS gauge updates on the map.
-4. Drag the tenant to another shard to run `MoveTenant`, then disable and recreate the route.
-5. Run the four-step noisy-neighbour demo: free tenants crowd a shard, enterprise joins, then `MoveTenant` isolates it on a quieter shard.
-6. Reset the demo tenants, provision a metadata-only shard with `RouteStore +`, and delete it with `Shard ×`.
-
-The load gauge is an observability aid for this demo, not an automatic placement policy. A live business-data pool exists for `shard-1` through `shard-4` in Compose.
-
-If the inline player is unavailable in a particular client, [open the hosted demo video directly](https://github.com/user-attachments/assets/9a838dc7-a300-4e25-8358-f4eeab272463).
 
 ## Core Usage
 
